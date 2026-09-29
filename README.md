@@ -2,7 +2,23 @@
 
 An unofficial, student-maintained command-line interface for the Brno University of Technology (VUT) information system. The intended executable name is `studis`. It will provide predictable JSON output for coding agents and useful commands for people. Studis is the familiar student portal name; the eventual scope may include other VUT systems where documented APIs and user permissions allow it.
 
-**Status:** project scaffold. The binary currently exits with an “unavailable” message. It does not authenticate or call VUT yet. This project is not affiliated with or endorsed by VUT.
+**Status:** early offline CLI foundation. The binary supports help, version, and command discovery. It does not authenticate or call VUT yet. This project is not affiliated with or endorsed by VUT.
+
+## Commands and output
+
+```sh
+studis --help
+studis --version
+studis capabilities
+```
+
+`studis capabilities` writes one JSON object to stdout:
+
+```json
+{"schema_version":1,"cli_version":"0.0.0","commands":["capabilities"]}
+```
+
+`schema_version` is an integer for this CLI-owned JSON contract; `cli_version` is the package version string; `commands` contains executable subcommand names. The output ends with a newline. Help and version print text on stdout. Clap handles help and version immediately, even if tokens follow them. Other parse errors, including a missing or unknown command, exit 2 with an explanation on stderr and empty stdout. Successful invocations exit 0 with empty stderr. `capabilities` output has no color codes or account-specific data. Clap diagnostics can echo invalid arguments, so never put secrets in command-line arguments. A closed output pipe exits successfully without a panic.
 
 ## Development setup
 
@@ -16,7 +32,7 @@ mise exec -- cargo test --locked --all-targets
 mise exec -- cargo build --locked
 ```
 
-The tracked pre-commit hook applies rustfmt, stops if formatted files need staging, checks staged whitespace, and runs Clippy. The pre-push hook runs tests and a build. Git does not enable repository hooks automatically on clone; the `git config` command above enables them for this checkout. The same four Rust checks run on GitHub Actions for pull requests and pushes to `master`. The current scaffold has no behavior tests; tests will accompany the first implemented commands. There is no release or deployment workflow yet.
+The tracked pre-commit hook applies rustfmt, stops if formatted files need staging, checks staged whitespace, and runs Clippy. The pre-push hook runs tests and a build. Git does not enable repository hooks automatically on clone; the `git config` command above enables them for this checkout. The same four Rust checks run on GitHub Actions for pull requests and pushes to `master`. The process tests run offline and require no VUT account. There is no release or deployment workflow yet.
 
 ## Credentials and live API testing
 
@@ -33,7 +49,7 @@ Live VUT checks will be opt-in and read-only by default. Documentation visibilit
 - `src/resources/`: endpoint-specific operations and wire types
 - `tests/`: process and mock-HTTP tests as commands are implemented
 - `docs/architecture.md`: module boundaries
-- `docs/first-slice.md`: proposed offline CLI foundation
+- `docs/first-slice.md`: refined offline CLI plan and scope decisions
 
 ## Contributing
 
