@@ -5,7 +5,7 @@ use reqwest::header::CONTENT_TYPE;
 
 use crate::{
     http,
-    token_store::{KeyringStore, TokenStore},
+    token_store::{PlatformTokenStore, TokenStore},
 };
 
 pub(crate) const TOKEN_URL: &str = "https://id.vut.cz/auth/common/oauth2/token";
@@ -114,27 +114,29 @@ where
     I: FnMut() -> Result<String, &'static str>,
     G: FnMut(&str) -> Result<String, http::GetError>,
 {
-    let cached = store.load()?;
-    let token = match cached {
-        Some(ref token) => token.clone(),
-        None => {
-            let token = issue()?;
-            store.save(&token)?;
-            token
-        }
+    let (token, came_from_cache) = match store.load()? {
+        Some(token) => (token, true),
+        None => store.with_lock(|| match store.load()? {
+            Some(token) => Ok((token, true)),
+            None => {
+                let token = issue()?;
+                store.save(&token)?;
+                Ok((token, false))
+            }
+        })?,
     };
 
     match get(&token) {
         Ok(body) => Ok(body),
-        Err(http::GetError::Unauthorized) if cached.is_some() => {
-            let replacement = match store.load()? {
-                Some(newer) if newer != token => newer,
+        Err(http::GetError::Unauthorized) if came_from_cache => {
+            let replacement = store.with_lock(|| match store.load()? {
+                Some(newer) if newer != token => Ok(newer),
                 _ => {
                     let newer = issue()?;
                     store.save(&newer)?;
-                    newer
+                    Ok(newer)
                 }
-            };
+            })?;
             get(&replacement).map_err(|error| error.message())
         }
         Err(error) => Err(error.message()),
@@ -154,7 +156,7 @@ where
     match source {
         AuthSource::Token(token) => get(&token).map_err(|error| error.message()),
         AuthSource::ClientCredentials(credentials) => {
-            let store = KeyringStore::new(&credentials.uid)?;
+            let store = PlatformTokenStore::new(&credentials.uid)?;
             run_cached(&store, || issue_token(&client, &credentials), get)
         }
     }
@@ -165,11 +167,21 @@ mod tests {
     use super::*;
     use reqwest::header::AUTHORIZATION;
     use std::cell::{Cell, RefCell};
+    #[cfg(unix)]
+    use std::{
+        fs::{self, OpenOptions},
+        io::Write,
+        path::{Path, PathBuf},
+        process::{Child, Command, Stdio},
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    };
 
     struct MemoryStore {
         token: RefCell<Option<String>>,
         fail_load: bool,
         fail_save: bool,
+        fail_lock: bool,
+        locks: Cell<usize>,
     }
 
     impl MemoryStore {
@@ -178,6 +190,8 @@ mod tests {
                 token: RefCell::new(token.map(str::to_owned)),
                 fail_load: false,
                 fail_save: false,
+                fail_lock: false,
+                locks: Cell::new(0),
             }
         }
     }
@@ -196,6 +210,17 @@ mod tests {
             }
             *self.token.borrow_mut() = Some(token.to_owned());
             Ok(())
+        }
+
+        fn with_lock<T>(
+            &self,
+            operation: impl FnOnce() -> Result<T, &'static str>,
+        ) -> Result<T, &'static str> {
+            self.locks.set(self.locks.get() + 1);
+            if self.fail_lock {
+                return Err("store lock failed");
+            }
+            operation()
         }
     }
 
@@ -228,6 +253,7 @@ mod tests {
         .expect("new token GET");
         assert_eq!(body, "response");
         assert_eq!(store.token.borrow().as_deref(), Some("new-token"));
+        assert_eq!(store.locks.get(), 1);
     }
 
     #[test]
@@ -255,6 +281,7 @@ mod tests {
         assert_eq!(grants.get(), 1);
         assert_eq!(gets.get(), 2);
         assert_eq!(store.token.borrow().as_deref(), Some("replacement"));
+        assert_eq!(store.locks.get(), 1);
     }
 
     #[test]
@@ -346,6 +373,32 @@ mod tests {
             run_cached(&store, || Ok("new".into()), |_| panic!("GET")),
             Err("store write failed")
         );
+    }
+
+    #[test]
+    fn lock_errors_stop_miss_and_cached_401_before_grant_or_retry() {
+        let mut missed = MemoryStore::new(None);
+        missed.fail_lock = true;
+        assert_eq!(
+            run_cached(&missed, || panic!("grant"), |_| panic!("GET")),
+            Err("store lock failed")
+        );
+
+        let mut cached = MemoryStore::new(Some("stale"));
+        cached.fail_lock = true;
+        let gets = Cell::new(0);
+        assert_eq!(
+            run_cached(
+                &cached,
+                || panic!("grant"),
+                |_| {
+                    gets.set(gets.get() + 1);
+                    Err(http::GetError::Unauthorized)
+                }
+            ),
+            Err("store lock failed")
+        );
+        assert_eq!(gets.get(), 1);
     }
 
     #[test]
@@ -445,5 +498,151 @@ mod tests {
         let source =
             select_source(None, Some("uid".into()), Some("secret".into())).expect("client source");
         assert!(matches!(source, AuthSource::ClientCredentials(_)));
+    }
+
+    #[cfg(unix)]
+    struct TestDirectory(PathBuf);
+
+    #[cfg(unix)]
+    impl TestDirectory {
+        fn new(label: &str) -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos();
+            Self(std::env::temp_dir().join(format!(
+                "studis-auth-{label}-{}-{nonce}",
+                std::process::id()
+            )))
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(unix)]
+    fn spawn_coordination_helper(directory: &Path, action: &str, id: &str) -> Child {
+        Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--ignored",
+                "--exact",
+                "auth::tests::coordinated_process_helper",
+            ])
+            .env("STUDIS_AUTH_TEST_DIRECTORY", directory)
+            .env("STUDIS_AUTH_TEST_ACTION", action)
+            .env("STUDIS_AUTH_TEST_ID", id)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn auth helper")
+    }
+
+    #[cfg(unix)]
+    fn wait_for_files(paths: &[PathBuf]) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while paths.iter().any(|path| !path.exists()) {
+            assert!(Instant::now() < deadline, "timed out waiting for helpers");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    fn finish_helpers(children: [Child; 2]) {
+        for child in children {
+            let output = child.wait_with_output().expect("wait for auth helper");
+            assert!(
+                output.status.success(),
+                "helper failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    fn grant_count(directory: &Path) -> usize {
+        fs::read_to_string(directory.join("grants"))
+            .expect("grant counter")
+            .lines()
+            .count()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn simultaneous_cache_misses_issue_one_grant_across_processes() {
+        let directory = TestDirectory::new("simultaneous-miss");
+        let children = [
+            spawn_coordination_helper(&directory.0, "miss", "one"),
+            spawn_coordination_helper(&directory.0, "miss", "two"),
+        ];
+        wait_for_files(&[directory.0.join("ready-one"), directory.0.join("ready-two")]);
+        fs::write(directory.0.join("go"), b"").expect("release helpers");
+        finish_helpers(children);
+        assert_eq!(grant_count(&directory.0), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn simultaneous_cached_401s_issue_one_replacement_across_processes() {
+        let directory = TestDirectory::new("simultaneous-401");
+        let store = PlatformTokenStore::new_in(&directory.0, "synthetic-uid")
+            .expect("create initial store");
+        store.save("stale-token").expect("save stale token");
+
+        let children = [
+            spawn_coordination_helper(&directory.0, "401", "one"),
+            spawn_coordination_helper(&directory.0, "401", "two"),
+        ];
+        wait_for_files(&[directory.0.join("stale-one"), directory.0.join("stale-two")]);
+        fs::write(directory.0.join("go"), b"").expect("release helpers");
+        finish_helpers(children);
+        assert_eq!(grant_count(&directory.0), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "child-process helper"]
+    fn coordinated_process_helper() {
+        let directory = PathBuf::from(
+            std::env::var_os("STUDIS_AUTH_TEST_DIRECTORY").expect("helper directory"),
+        );
+        let action = std::env::var("STUDIS_AUTH_TEST_ACTION").expect("helper action");
+        let id = std::env::var("STUDIS_AUTH_TEST_ID").expect("helper id");
+        let store = PlatformTokenStore::new_in(&directory, "synthetic-uid").expect("helper store");
+
+        if action == "miss" {
+            fs::write(directory.join(format!("ready-{id}")), b"").expect("signal ready");
+            wait_for_files(&[directory.join("go")]);
+        }
+
+        let result = run_cached(
+            &store,
+            || {
+                let mut grants = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(directory.join("grants"))
+                    .expect("open grant counter");
+                grants.write_all(b"grant\n").expect("record grant");
+                std::thread::sleep(Duration::from_millis(200));
+                Ok("replacement-token".to_owned())
+            },
+            |token| match (action.as_str(), token) {
+                ("miss", "replacement-token") | ("401", "replacement-token") => {
+                    Ok("response".to_owned())
+                }
+                ("401", "stale-token") => {
+                    fs::write(directory.join(format!("stale-{id}")), b"")
+                        .expect("signal stale GET");
+                    wait_for_files(&[directory.join("go")]);
+                    Err(http::GetError::Unauthorized)
+                }
+                _ => panic!("unexpected helper token"),
+            },
+        );
+        assert_eq!(result.as_deref(), Ok("response"));
     }
 }

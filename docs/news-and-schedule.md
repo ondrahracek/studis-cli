@@ -1,6 +1,6 @@
 # Study news and personal schedule
 
-These commands use documented VUT GETs. They use an already-issued Bearer token from `VUT_API_ACCESS_TOKEN` when present, or reuse an OS-stored token associated with `VUT_API_CLIENT_UID` and `VUT_API_CLIENT_SECRET`. The CLI does not read `.env` itself. A cached token rejected with HTTP 401 causes one new client-credentials grant and one repeat of the same GET; other failures are not retried. They do not select or save a study ID, follow redirects, or perform a VUT data write. Authentication setup and the JSON ownership boundary are also described in [studies access](studies-access.md).
+These commands use documented VUT GETs. They use an already-issued Bearer token from `VUT_API_ACCESS_TOKEN` when present, or reuse a token associated with `VUT_API_CLIENT_UID` from a private plaintext Unix file or Windows Credential Manager. The CLI does not read `.env` itself. A cached token rejected with HTTP 401 causes one new client-credentials grant and one repeat of the same GET; other failures are not retried. They do not select or save a study ID, follow redirects, or perform a VUT data write. Authentication setup and the JSON ownership boundary are also described in [studies access](studies-access.md).
 
 | Command | Documented GET | Query mapping | Expected data |
 | --- | --- | --- | --- |
