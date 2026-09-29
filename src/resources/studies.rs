@@ -2,7 +2,7 @@
 
 use reqwest::blocking::{Client, Request};
 
-use crate::{auth, http};
+use crate::auth;
 
 pub(crate) const STUDIES_URL: &str = "https://api.vut.cz/api/moje/studia/v1";
 
@@ -28,9 +28,7 @@ pub(crate) fn parse_studies(body: &str) -> Result<serde_json::Value, &'static st
 }
 
 pub(crate) fn fetch() -> Result<serde_json::Value, &'static str> {
-    let (client, token) = auth::session()?;
-    let studies_request = studies_request(&client, &token)?;
-    parse_studies(&http::get_body(&client, studies_request)?)
+    parse_studies(&auth::get_body(studies_request)?)
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 
 use reqwest::blocking::{Client, Request};
 
-use crate::{auth, http, resources};
+use crate::{auth, resources};
 
 pub(crate) const TEACHING_URL: &str = "https://api.vut.cz/api/rozvrh/osobni/vyucovani/v4";
 pub(crate) const WEEKS_URL: &str = "https://api.vut.cz/api/rozvrh/osobni/vyucovani/tydny/v2";
@@ -44,15 +44,15 @@ pub(crate) fn parse_weeks(body: &str) -> Result<serde_json::Value, &'static str>
 }
 
 pub(crate) fn fetch_teaching(from: &str, to: &str) -> Result<serde_json::Value, &'static str> {
-    let (client, token) = auth::session()?;
-    let request = teaching_request(&client, &token, from, to)?;
-    parse_teaching(&http::get_body(&client, request)?)
+    parse_teaching(&auth::get_body(|client, token| {
+        teaching_request(client, token, from, to)
+    })?)
 }
 
 pub(crate) fn fetch_weeks(from: &str, to: &str) -> Result<serde_json::Value, &'static str> {
-    let (client, token) = auth::session()?;
-    let request = weeks_request(&client, &token, from, to)?;
-    parse_weeks(&http::get_body(&client, request)?)
+    parse_weeks(&auth::get_body(|client, token| {
+        weeks_request(client, token, from, to)
+    })?)
 }
 
 #[cfg(test)]
