@@ -1,12 +1,12 @@
 # Read-only studies access
 
-`studis studies list` obtains a VUT OAuth client-credentials token and reads `GET /api/moje/studia/v1`. It performs no VUT write action. The command is an unofficial student-maintained integration, not a VUT service.
+`studis studies list` uses an environment-provided Bearer token or obtains a VUT OAuth client-credentials token, then reads `GET /api/moje/studia/v1`. It performs no VUT data write action. The command is an unofficial student-maintained integration, not a VUT service.
 
 ## Endpoint provenance and observed limits
 
 - [VUT's personal API access guide](https://doc.vut.cz/cs/UzivatelskeUctyPrukazyIdentita/PristupAPI) describes the user-owned client credentials. A read-only probe verified HTTP Basic client authentication with `grant_type=client_credentials` at `https://id.vut.cz/auth/common/oauth2/token`; the returned token was Bearer. [OAuth client credentials](https://www.rfc-editor.org/rfc/rfc6749.html#section-4.4) defines the grant used here.
 - The authenticated [legacy studies endpoint documentation](https://api.vut.cz/doc/area/1789/endpoint/417366/method/4) lists `GET /api/moje/studia/v1`. Read-only checks with one client returned HTTP 200 and a JSON object with top-level `format` and `data`, with `data.studia` an array. No pagination-looking header or top-level/data key appeared in the observed response. This does not prove every account has the same permissions or that pagination never exists.
-- The CLI reads `VUT_API_CLIENT_UID` and `VUT_API_CLIENT_SECRET` from exported environment variables. It does not read `.env` itself, accept credentials as arguments, cache a token, refresh it, retry a request, or allow an alternate endpoint URL. The HTTP client has a 10-second connect timeout, a 20-second total timeout per request, and does not follow redirects. The token lives only in the process.
+- The CLI reads `VUT_API_CLIENT_UID` and `VUT_API_CLIENT_SECRET` from exported environment variables, or uses a nonempty `VUT_API_ACCESS_TOKEN` when supplied. The access token takes precedence and skips the grant. It does not read `.env` itself, accept credentials as arguments, cache or refresh a token, retry a request, or allow an alternate endpoint URL. The HTTP client has a 10-second connect timeout, a 20-second total timeout per request, and does not follow redirects. The token lives only in the process.
 
 ## Output contract
 
@@ -26,4 +26,4 @@ Routine tests and CI stay offline. Process tests cover command discovery and mis
 
 ## Scope decisions
 
-The user explicitly rejected local mock servers and recreating VUT's API. This implementation uses pure request/response tests and the real read-only API check. It keeps complete upstream JSON under `raw` because field semantics have not been verified enough for a stable curated study model. Endpoint overrides, a generic transport trait, token cache, refresh/retry framework, generic API explorer, Bitwarden provider, other resource commands, and all VUT writes were cut as unnecessary for one token request and one GET. Do not add them to this command without a separate demonstrated need and design.
+The user explicitly rejected local mock servers and recreating VUT's API. This implementation uses pure request/response tests and a separate real read-only API check. It keeps complete upstream JSON under `raw` because field semantics have not been verified enough for a stable curated study model. The command has no endpoint override, persistent token cache, retry, or VUT write operation.

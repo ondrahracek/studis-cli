@@ -28,32 +28,9 @@ pub(crate) fn parse_studies(body: &str) -> Result<serde_json::Value, &'static st
 }
 
 pub(crate) fn fetch() -> Result<serde_json::Value, &'static str> {
-    let credentials = auth::credentials_from_env()?;
-    let client = http::client()?;
-
-    let token_request = auth::token_request(&client, &credentials)?;
-    let token_response = client
-        .execute(token_request)
-        .map_err(|_| "unable to contact VUT authentication service")?;
-    if token_response.status() != reqwest::StatusCode::OK {
-        return Err("VUT authentication failed");
-    }
-    let token_body = token_response
-        .text()
-        .map_err(|_| "unable to read VUT authentication response")?;
-    let token = auth::parse_access_token(&token_body)?;
-
+    let (client, token) = auth::session()?;
     let studies_request = studies_request(&client, &token)?;
-    let studies_response = client
-        .execute(studies_request)
-        .map_err(|_| "unable to contact VUT studies service")?;
-    if studies_response.status() != reqwest::StatusCode::OK {
-        return Err("VUT studies request failed");
-    }
-    let studies_body = studies_response
-        .text()
-        .map_err(|_| "unable to read VUT studies response")?;
-    parse_studies(&studies_body)
+    parse_studies(&http::get_body(&client, studies_request)?)
 }
 
 #[cfg(test)]

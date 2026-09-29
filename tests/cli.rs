@@ -7,7 +7,8 @@ fn studis() -> Command {
     let mut command = Command::cargo_bin("studis").expect("binary is built for integration tests");
     command
         .env_remove("VUT_API_CLIENT_UID")
-        .env_remove("VUT_API_CLIENT_SECRET");
+        .env_remove("VUT_API_CLIENT_SECRET")
+        .env_remove("VUT_API_ACCESS_TOKEN");
     command
 }
 
@@ -47,7 +48,13 @@ fn capabilities_has_exact_versioned_json_contract() {
         json!({
             "schema_version": 1,
             "cli_version": env!("CARGO_PKG_VERSION"),
-            "commands": ["capabilities", "studies list"]
+            "commands": [
+                "capabilities",
+                "studies list",
+                "news list",
+                "schedule teaching",
+                "schedule weeks"
+            ]
         })
     );
 
@@ -114,6 +121,117 @@ fn studies_list_rejects_missing_or_empty_credentials() {
         assert!(stderr.contains("credentials"));
         assert!(!stderr.contains("dummy-uid"));
         assert!(!stderr.contains("dummy-secret"));
+    }
+}
+
+#[test]
+fn new_read_commands_reject_missing_credentials_without_network() {
+    for args in [
+        vec!["news", "list", "--since", "2026-09-29"],
+        vec![
+            "schedule",
+            "teaching",
+            "--from",
+            "2026-09-29T08:00",
+            "--to",
+            "2026-09-29T18:00",
+        ],
+        vec![
+            "schedule",
+            "weeks",
+            "--from",
+            "2026-09-28",
+            "--to",
+            "2026-10-04",
+        ],
+    ] {
+        let output = studis().args(args).output().expect("run read command");
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("credentials"));
+    }
+}
+
+#[test]
+fn empty_supplied_token_fails_without_using_client_credentials() {
+    let output = studis()
+        .env("VUT_API_ACCESS_TOKEN", "")
+        .env("VUT_API_CLIENT_UID", "dummy-uid")
+        .env("VUT_API_CLIENT_SECRET", "dummy-secret")
+        .args(["studies", "list"])
+        .output()
+        .expect("run with empty token");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 diagnostic");
+    assert!(stderr.contains("access token is empty"));
+    assert!(!stderr.contains("dummy-uid"));
+    assert!(!stderr.contains("dummy-secret"));
+}
+
+#[test]
+fn invalid_dates_and_reversed_ranges_exit_two_before_credentials() {
+    for args in [
+        vec!["news", "list", "--since", "2026-02-30"],
+        vec!["news", "list"],
+        vec![
+            "schedule",
+            "teaching",
+            "--from",
+            "2026-09-29",
+            "--to",
+            "2026-09-30",
+        ],
+        vec![
+            "schedule",
+            "teaching",
+            "--from",
+            "2026-09-29T08:00",
+            "--to",
+            "2026-09-29T24:00",
+        ],
+        vec![
+            "schedule",
+            "teaching",
+            "--from",
+            "2026-09-29T18:00",
+            "--to",
+            "2026-09-29T08:00",
+        ],
+        vec![
+            "schedule",
+            "weeks",
+            "--from",
+            "2026-10-04",
+            "--to",
+            "2026-09-28",
+        ],
+        vec!["schedule", "weeks", "--from", "2026-09-28"],
+        vec![
+            "schedule",
+            "weeks",
+            "--from",
+            "2026-02-30",
+            "--to",
+            "2026-03-01",
+        ],
+        vec![
+            "schedule",
+            "weeks",
+            "--from",
+            "2026-03-01",
+            "--to",
+            "2026-02-30",
+        ],
+    ] {
+        let output = studis()
+            .args(args)
+            .output()
+            .expect("run invalid read command");
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(!output.stderr.is_empty());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("credentials"));
     }
 }
 
