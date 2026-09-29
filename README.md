@@ -49,7 +49,7 @@ Live VUT checks will be opt-in and read-only by default. Documentation visibilit
 - `src/resources/`: endpoint-specific operations and wire types
 - `tests/`: process and mock-HTTP tests as commands are implemented
 - `docs/architecture.md`: module boundaries
-- `docs/first-slice.md`: refined offline CLI plan and scope decisions
+- `docs/cli-foundation.md`: current command and output contract
 
 ## Contributing
 
