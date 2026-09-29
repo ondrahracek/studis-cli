@@ -47,7 +47,7 @@ fn capabilities_has_exact_versioned_json_contract() {
         json!({
             "schema_version": 1,
             "cli_version": env!("CARGO_PKG_VERSION"),
-            "commands": ["capabilities"]
+            "commands": ["capabilities", "studies list"]
         })
     );
 
@@ -87,6 +87,34 @@ fn missing_command_exits_two_without_stdout() {
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     assert!(!output.stderr.is_empty());
+}
+
+#[test]
+fn studies_list_rejects_missing_or_empty_credentials() {
+    for (uid, secret) in [
+        (None, None),
+        (Some("dummy-uid"), None),
+        (None, Some("dummy-secret")),
+        (Some(""), Some("dummy-secret")),
+        (Some("dummy-uid"), Some("")),
+    ] {
+        let mut command = studis();
+        command.args(["studies", "list"]);
+        if let Some(uid) = uid {
+            command.env("VUT_API_CLIENT_UID", uid);
+        }
+        if let Some(secret) = secret {
+            command.env("VUT_API_CLIENT_SECRET", secret);
+        }
+
+        let output = command.output().expect("run studies list");
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).expect("UTF-8 diagnostic");
+        assert!(stderr.contains("credentials"));
+        assert!(!stderr.contains("dummy-uid"));
+        assert!(!stderr.contains("dummy-secret"));
+    }
 }
 
 #[cfg(unix)]

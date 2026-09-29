@@ -2,4 +2,4 @@
 
 mod news;
 mod schedule;
-mod studies;
+pub(crate) mod studies;
