@@ -21,6 +21,198 @@ fn help_succeeds_without_stderr() {
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 help");
     assert!(stdout.contains("Usage: studis"));
     assert!(stdout.contains("capabilities"));
+    assert!(stdout.contains("account"));
+    assert!(stdout.contains("subjects"));
+}
+
+#[test]
+fn subject_help_explains_explicit_scope_and_json() {
+    let group = studis()
+        .args(["subjects", "--help"])
+        .output()
+        .expect("subject help");
+    assert!(group.status.success());
+    assert!(String::from_utf8_lossy(&group.stdout).contains("show"));
+
+    let show = studis()
+        .args(["subjects", "show", "--help"])
+        .output()
+        .expect("show help");
+    assert!(show.status.success());
+    let text = String::from_utf8_lossy(&show.stdout);
+    for flag in [
+        "--offering-id",
+        "--study-id",
+        "--from",
+        "--to",
+        "--news-since",
+        "--max-news",
+    ] {
+        assert!(text.contains(flag), "missing {flag}");
+    }
+    assert!(text.contains("JSON"));
+    assert!(text.contains("CODE_OR_NAME"));
+}
+
+#[test]
+fn subject_show_positional_lookup_and_offering_only_reach_authentication() {
+    for args in [
+        vec!["subjects", "show", "IZP"],
+        vec!["subjects", "show", "--offering-id", "42"],
+    ] {
+        let output = studis().args(args).output().expect("run shorthand lookup");
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("credentials"));
+    }
+}
+
+#[test]
+fn subject_show_rejects_missing_or_partial_flag_only_identity() {
+    for args in [
+        vec!["subjects", "show"],
+        vec!["subjects", "show", "--study-id", "7"],
+    ] {
+        let output = studis().args(args).output().expect("run incomplete lookup");
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("CODE_OR_NAME") || stderr.contains("--offering-id"));
+        assert!(!stderr.contains("credentials"));
+    }
+}
+
+#[test]
+fn subject_show_keeps_the_explicit_route_until_authentication() {
+    let output = studis()
+        .args([
+            "subjects",
+            "show",
+            "--study-id",
+            "7",
+            "--offering-id",
+            "42",
+            "--from",
+            "2026-09-01T00:00",
+            "--to",
+            "2027-08-31T23:59",
+            "--news-since",
+            "2026-09-01",
+        ])
+        .output()
+        .expect("run explicit subject route");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("credentials"));
+}
+
+#[test]
+fn subject_show_rejects_invalid_scope_before_credentials() {
+    for args in [
+        vec![
+            "subjects",
+            "show",
+            "--offering-id",
+            "0",
+            "--study-id",
+            "7",
+            "--from",
+            "2026-09-29T08:00",
+            "--to",
+            "2026-09-29T18:00",
+            "--news-since",
+            "2026-09-01",
+        ],
+        vec![
+            "subjects",
+            "show",
+            "--offering-id",
+            "5",
+            "--study-id",
+            "7",
+            "--from",
+            "2026-09-29T18:00",
+            "--to",
+            "2026-09-29T08:00",
+            "--news-since",
+            "2026-09-01",
+        ],
+        vec![
+            "subjects",
+            "show",
+            "--offering-id",
+            "5",
+            "--study-id",
+            "7",
+            "--from",
+            "2026-09-29T08:00",
+            "--to",
+            "2026-09-29T18:00",
+            "--news-since",
+            "2026-02-30",
+        ],
+        vec![
+            "subjects",
+            "show",
+            "--offering-id",
+            "5",
+            "--study-id",
+            "7",
+            "--from",
+            "2026-09-29T08:00",
+            "--to",
+            "2026-09-29T18:00",
+            "--news-since",
+            "2026-09-01",
+            "--max-news",
+            "0",
+        ],
+    ] {
+        let output = studis()
+            .args(args)
+            .output()
+            .expect("run invalid subject show");
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("credentials"));
+    }
+}
+
+#[test]
+fn web_login_help_and_missing_browser_have_noninteractive_contract() {
+    let help = studis()
+        .args(["auth", "web", "login", "--help"])
+        .output()
+        .expect("web login help");
+    assert!(help.status.success());
+    assert!(String::from_utf8_lossy(&help.stdout).contains("login"));
+
+    let output = studis()
+        .env("STUDIS_BROWSER_PATH", "/no/such/browser")
+        .args(["auth", "web", "login"])
+        .output()
+        .expect("web login without browser");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("credentials"));
+}
+
+#[test]
+fn academic_context_subcommand_help_lists_new_reads() {
+    for (group, expected) in [
+        ("studies", "index"),
+        ("account", "roles"),
+        ("schedule", "terms"),
+    ] {
+        let output = studis()
+            .args([group, "--help"])
+            .output()
+            .expect("run subcommand help");
+
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert!(String::from_utf8_lossy(&output.stdout).contains(expected));
+    }
 }
 
 #[test]
@@ -51,9 +243,14 @@ fn capabilities_has_exact_versioned_json_contract() {
             "commands": [
                 "capabilities",
                 "studies list",
+                "studies index",
+                "account roles",
                 "news list",
                 "schedule teaching",
-                "schedule weeks"
+                "schedule weeks",
+                "schedule terms",
+                "subjects show",
+                "auth web login"
             ]
         })
     );
@@ -127,6 +324,9 @@ fn studies_list_rejects_missing_or_empty_credentials() {
 #[test]
 fn new_read_commands_reject_missing_credentials_without_network() {
     for args in [
+        vec!["studies", "index", "--study-id", "7"],
+        vec!["account", "roles"],
+        vec!["schedule", "terms"],
         vec!["news", "list", "--since", "2026-09-29"],
         vec![
             "schedule",
@@ -149,6 +349,36 @@ fn new_read_commands_reject_missing_credentials_without_network() {
         assert_eq!(output.status.code(), Some(1));
         assert!(output.stdout.is_empty());
         assert!(String::from_utf8_lossy(&output.stderr).contains("credentials"));
+    }
+}
+
+#[test]
+fn schedule_terms_has_no_undocumented_date_flags() {
+    for flag in ["--from", "--to"] {
+        let output = studis()
+            .args(["schedule", "terms", flag, "2026-09-29"])
+            .output()
+            .expect("run terms with unsupported flag");
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(!output.stderr.is_empty());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("credentials"));
+    }
+}
+
+#[test]
+fn invalid_study_ids_exit_two_before_credentials() {
+    for args in [
+        vec!["studies", "index"],
+        vec!["studies", "index", "--study-id", "-1"],
+        vec!["studies", "index", "--study-id", "not-a-number"],
+        vec!["studies", "index", "--study-id", "18446744073709551616"],
+    ] {
+        let output = studis().args(args).output().expect("run invalid study ID");
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(!output.stderr.is_empty());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("credentials"));
     }
 }
 

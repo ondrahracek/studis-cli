@@ -6,6 +6,7 @@ use crate::{auth, resources};
 
 pub(crate) const TEACHING_URL: &str = "https://api.vut.cz/api/rozvrh/osobni/vyucovani/v4";
 pub(crate) const WEEKS_URL: &str = "https://api.vut.cz/api/rozvrh/osobni/vyucovani/tydny/v2";
+pub(crate) const TERMS_URL: &str = "https://api.vut.cz/api/rozvrh/osobni/terminy/v3";
 
 pub(crate) fn teaching_request(
     client: &Client,
@@ -35,12 +36,24 @@ pub(crate) fn weeks_request(
         .map_err(|_| "unable to prepare VUT teaching weeks request")
 }
 
+pub(crate) fn terms_request(client: &Client, token: &str) -> Result<Request, &'static str> {
+    client
+        .get(TERMS_URL)
+        .bearer_auth(token)
+        .build()
+        .map_err(|_| "unable to prepare VUT terms request")
+}
+
 pub(crate) fn parse_teaching(body: &str) -> Result<serde_json::Value, &'static str> {
     resources::parse_list(body, "vyucovani")
 }
 
 pub(crate) fn parse_weeks(body: &str) -> Result<serde_json::Value, &'static str> {
     resources::parse_list(body, "tydny")
+}
+
+pub(crate) fn parse_terms(body: &str) -> Result<serde_json::Value, &'static str> {
+    resources::parse_required_array(body, "terminy", "invalid VUT terms response")
 }
 
 pub(crate) fn fetch_teaching(from: &str, to: &str) -> Result<serde_json::Value, &'static str> {
@@ -53,6 +66,10 @@ pub(crate) fn fetch_weeks(from: &str, to: &str) -> Result<serde_json::Value, &'s
     parse_weeks(&auth::get_body(|client, token| {
         weeks_request(client, token, from, to)
     })?)
+}
+
+pub(crate) fn fetch_terms() -> Result<serde_json::Value, &'static str> {
+    parse_terms(&auth::get_body(terms_request)?)
 }
 
 #[cfg(test)]
@@ -124,6 +141,41 @@ mod tests {
             };
             let non_array = json!({"data":{(expected):{}}});
             assert!(parse(&non_array.to_string()).is_err());
+        }
+    }
+
+    #[test]
+    fn terms_request_is_fixed_bearer_get_without_query_or_body() {
+        let request = terms_request(&Client::new(), "dummy").expect("terms request");
+        assert_eq!(request.method(), reqwest::Method::GET);
+        assert_eq!(
+            request.url().as_str(),
+            "https://api.vut.cz/api/rozvrh/osobni/terminy/v3"
+        );
+        assert!(request.url().query().is_none());
+        assert_eq!(request.headers()[AUTHORIZATION], "Bearer dummy");
+        assert!(request.body().is_none());
+    }
+
+    #[test]
+    fn terms_parser_requires_terminy_array_and_preserves_raw_response() {
+        let raw = json!({
+            "format": "json",
+            "data": {"terminy": [{"future": true}]},
+            "extra": "untouched"
+        });
+        assert_eq!(parse_terms(&raw.to_string()).expect("terms"), raw);
+        assert_eq!(
+            parse_terms(r#"{"data":{"terminy":[]}}"#).expect("empty terms"),
+            json!({"data":{"terminy":[]}})
+        );
+        for body in [
+            "not json",
+            "{}",
+            r#"{"data":{}}"#,
+            r#"{"data":{"terminy":{}}}"#,
+        ] {
+            assert!(parse_terms(body).is_err(), "accepted {body}");
         }
     }
 }

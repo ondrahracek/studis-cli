@@ -1,6 +1,6 @@
 # Read-only studies access
 
-`studis studies list` uses an environment-provided Bearer token or obtains a VUT OAuth client-credentials token, then reads `GET /api/moje/studia/v1`. It performs no VUT data write action. The command is an unofficial student-maintained integration, not a VUT service.
+`studis studies list` uses an environment-provided Bearer token or obtains a VUT OAuth client-credentials token, then reads `GET /api/moje/studia/v1`. It performs no VUT data write action. The command is an unofficial student-maintained integration, not a VUT service. The related study-index, account-role, and personal-terms reads are documented in [academic context reads](academic-context.md).
 
 ## Endpoint provenance and observed limits
 

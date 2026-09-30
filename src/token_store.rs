@@ -47,6 +47,7 @@ impl TokenStore for KeyringStore {
 #[cfg(unix)]
 mod unix {
     use super::TokenStore;
+    use crate::unix_acl::descriptor_has_no_extended_acl;
     use directories::ProjectDirs;
     use rustix::fs::{self as unix_fs, FileType, Mode, OFlags};
     use serde::{Deserialize, Serialize};
@@ -58,8 +59,6 @@ mod unix {
         path::Path,
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
-    #[cfg(target_os = "macos")]
-    use std::{ffi::c_void, os::fd::AsRawFd, ptr};
 
     const CACHE_FILE: &str = "token-cache.json";
     const LOCK_FILE: &str = "token-cache.lock";
@@ -228,18 +227,34 @@ mod unix {
         }
 
         fn open_lock(&self) -> Result<File, &'static str> {
-            let file = unix_fs::openat(
-                &self.directory,
-                LOCK_FILE,
-                OFlags::RDWR
-                    | OFlags::CREATE
-                    | OFlags::NOFOLLOW
-                    | OFlags::NONBLOCK
-                    | OFlags::CLOEXEC,
-                Mode::RUSR | Mode::WUSR,
-            )
-            .map(File::from)
-            .map_err(|_| "VUT token cache lock is unsafe")?;
+            let flags = OFlags::RDWR | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+            let mut opened = None;
+            // A concurrent creator can make the first lookup race on macOS.
+            for _ in 0..3 {
+                match unix_fs::openat(&self.directory, LOCK_FILE, flags, Mode::empty()) {
+                    Ok(file) => {
+                        opened = Some(File::from(file));
+                        break;
+                    }
+                    Err(rustix::io::Errno::NOENT) => {
+                        match unix_fs::openat(
+                            &self.directory,
+                            LOCK_FILE,
+                            flags | OFlags::CREATE | OFlags::EXCL,
+                            Mode::RUSR | Mode::WUSR,
+                        ) {
+                            Ok(file) => {
+                                opened = Some(File::from(file));
+                                break;
+                            }
+                            Err(rustix::io::Errno::EXIST | rustix::io::Errno::NOENT) => continue,
+                            Err(_) => return Err("VUT token cache lock is unsafe"),
+                        }
+                    }
+                    Err(_) => return Err("VUT token cache lock is unsafe"),
+                }
+            }
+            let file = opened.ok_or("VUT token cache lock is unsafe")?;
             validate_descriptor(&file, FileType::RegularFile, Mode::RUSR | Mode::WUSR)
                 .map_err(|_| "VUT token cache lock is unsafe")?;
             Ok(file)
@@ -325,42 +340,6 @@ mod unix {
             && Mode::from_raw_mode(metadata.st_mode) == expected_mode
             && metadata.st_uid == expected_uid
             && (expected_type != FileType::RegularFile || metadata.st_nlink == 1)
-    }
-
-    #[cfg(target_os = "macos")]
-    fn descriptor_has_no_extended_acl(file: &File) -> Result<bool, ()> {
-        const ACL_FIRST_ENTRY: i32 = 0;
-        const ACL_TYPE_EXTENDED: i32 = 0x100;
-
-        unsafe extern "C" {
-            fn acl_get_fd_np(fd: i32, acl_type: i32) -> *mut c_void;
-            fn acl_get_entry(acl: *mut c_void, entry_id: i32, entry: *mut *mut c_void) -> i32;
-            fn acl_free(object: *mut c_void) -> i32;
-        }
-
-        // SAFETY: `file` owns a live descriptor, and the type value comes from macOS sys/acl.h.
-        let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
-        if acl.is_null() {
-            return match std::io::Error::last_os_error().raw_os_error() {
-                Some(errno) if errno == rustix::io::Errno::NOENT.raw_os_error() => Ok(true),
-                _ => Err(()),
-            };
-        }
-
-        let mut entry = ptr::null_mut();
-        // SAFETY: `acl` was returned by `acl_get_fd_np`; `entry` is a valid output pointer.
-        let entry_status = unsafe { acl_get_entry(acl, ACL_FIRST_ENTRY, &mut entry) };
-        // SAFETY: macOS requires each non-null ACL returned by `acl_get_fd_np` to be freed once.
-        let free_status = unsafe { acl_free(acl) };
-        if entry_status != 0 || free_status != 0 {
-            return Err(());
-        }
-        Ok(false)
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn descriptor_has_no_extended_acl(_file: &File) -> Result<bool, ()> {
-        Ok(true)
     }
 
     #[cfg(test)]

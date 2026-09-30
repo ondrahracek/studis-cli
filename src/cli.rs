@@ -4,12 +4,15 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 use std::{
     io::{self, Write},
+    num::NonZeroU64,
     process::ExitCode,
 };
 
 use crate::{
     dates,
-    resources::{news, schedule, studies},
+    resources::{account, news, schedule, studies},
+    subject_view,
+    web_session::WebSession,
 };
 
 #[derive(Parser)]
@@ -35,6 +38,11 @@ enum Command {
         #[command(subcommand)]
         command: StudiesCommand,
     },
+    /// Read account context.
+    Account {
+        #[command(subcommand)]
+        command: AccountCommand,
+    },
     /// Read study news.
     News {
         #[command(subcommand)]
@@ -45,12 +53,80 @@ enum Command {
         #[command(subcommand)]
         command: ScheduleCommand,
     },
+    /// Compose read-only information about one subject offering.
+    Subjects {
+        #[command(subcommand)]
+        command: SubjectsCommand,
+    },
+    /// Manage a separate user-driven web login for Studis and Moodle reads.
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuthCommand {
+    /// Manage the isolated browser session.
+    Web {
+        #[command(subcommand)]
+        command: WebAuthCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum WebAuthCommand {
+    /// Open a headed browser for VUT SSO; no password enters the CLI.
+    Login,
+}
+
+#[derive(Subcommand)]
+enum SubjectsCommand {
+    /// Return one subject view as CLI-owned JSON; sections report unavailable sources.
+    Show {
+        #[arg(
+            value_name = "CODE_OR_NAME",
+            help = "Exact subject code, or exact display name if no code matches"
+        )]
+        code_or_name: Option<String>,
+        #[arg(
+            long,
+            value_name = "ID",
+            help = "Optional term-specific offering selector (Studis apid)"
+        )]
+        offering_id: Option<NonZeroU64>,
+        #[arg(
+            long,
+            value_name = "ID",
+            help = "Optional study selector from studies list"
+        )]
+        study_id: Option<NonZeroU64>,
+        #[arg(long, value_name = "YYYY-MM-DDTHH:MM", help = "Local teaching-window start", value_parser = dates::local_datetime)]
+        from: Option<String>,
+        #[arg(long, value_name = "YYYY-MM-DDTHH:MM", help = "Local teaching-window end", value_parser = dates::local_datetime)]
+        to: Option<String>,
+        #[arg(long, value_name = "YYYY-MM-DD", help = "Start date for subject announcements", value_parser = dates::date)]
+        news_since: Option<String>,
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=50), help = "Cap matching announcements to hydrate (1–50); shorthand defaults to all returned rows")]
+        max_news: Option<u8>,
+    },
 }
 
 #[derive(Subcommand)]
 enum StudiesCommand {
     /// Return studies from VUT as upstream-owned JSON.
     List,
+    /// Return the index for an explicit study as upstream-owned JSON.
+    Index {
+        #[arg(long, value_name = "ID", help = "Numeric study ID from studies list")]
+        study_id: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum AccountCommand {
+    /// Return account roles from VUT as upstream-owned JSON.
+    Roles,
 }
 
 #[derive(Subcommand)]
@@ -78,6 +154,8 @@ enum ScheduleCommand {
         #[arg(long, value_name = "YYYY-MM-DD", help = "End date for related teaching weeks", value_parser = dates::date)]
         to: String,
     },
+    /// Return the terms selected by VUT for your account.
+    Terms,
 }
 
 #[derive(Serialize)]
@@ -123,6 +201,20 @@ fn validate_range(from: &str, to: &str) -> Result<(), ExitCode> {
     })
 }
 
+fn default_news_limit(explicit_route: bool, requested: Option<u8>) -> usize {
+    requested
+        .map(usize::from)
+        .unwrap_or(if explicit_route { 10 } else { 0 })
+}
+
+fn subject_error_exit_code(message: &str) -> ExitCode {
+    if message == "--from must not be after --to" {
+        ExitCode::from(2)
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
 fn write_json_to(output: &impl Serialize, writer: &mut impl Write) -> ExitCode {
     let json = serde_json::to_string(output).expect("CLI output is serializable");
     match writeln!(writer, "{json}") {
@@ -151,15 +243,24 @@ pub fn run() -> ExitCode {
                 commands: &[
                     "capabilities",
                     "studies list",
+                    "studies index",
+                    "account roles",
                     "news list",
                     "schedule teaching",
                     "schedule weeks",
+                    "schedule terms",
+                    "subjects show",
+                    "auth web login",
                 ],
             };
             write_json(&output)
         }
         Command::Studies { command } => match command {
             StudiesCommand::List => write_raw(studies::fetch()),
+            StudiesCommand::Index { study_id } => write_raw(studies::fetch_index(study_id)),
+        },
+        Command::Account { command } => match command {
+            AccountCommand::Roles => write_raw(account::fetch_roles()),
         },
         Command::News { command } => match command {
             NewsCommand::List { since } => write_raw(news::fetch(&since)),
@@ -177,6 +278,80 @@ pub fn run() -> ExitCode {
                 }
                 write_raw(schedule::fetch_weeks(&from, &to))
             }
+            ScheduleCommand::Terms => write_raw(schedule::fetch_terms()),
+        },
+        Command::Subjects { command } => match command {
+            SubjectsCommand::Show {
+                code_or_name,
+                offering_id,
+                study_id,
+                from,
+                to,
+                news_since,
+                max_news,
+            } => {
+                let explicit_route =
+                    code_or_name.is_none() && study_id.is_some() && offering_id.is_some();
+                if code_or_name.is_none() && offering_id.is_none() {
+                    eprintln!("studis: provide CODE_OR_NAME or both --study-id and --offering-id");
+                    return ExitCode::from(2);
+                }
+                if explicit_route && (from.is_none() || to.is_none() || news_since.is_none()) {
+                    eprintln!(
+                        "studis: the explicit ID route requires --from, --to, and --news-since"
+                    );
+                    return ExitCode::from(2);
+                }
+                if code_or_name
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())
+                {
+                    eprintln!("studis: CODE_OR_NAME must not be empty");
+                    return ExitCode::from(2);
+                }
+                if let (Some(from), Some(to)) = (&from, &to)
+                    && let Err(code) = validate_range(from, to)
+                {
+                    return code;
+                }
+                match subject_view::fetch(subject_view::SubjectRequest {
+                    code_or_name,
+                    offering_id: offering_id.map(NonZeroU64::get),
+                    study_id: study_id.map(NonZeroU64::get),
+                    from,
+                    to,
+                    news_since,
+                    max_news: default_news_limit(explicit_route, max_news),
+                }) {
+                    Ok(view) => write_json(&view),
+                    Err(message) => {
+                        eprintln!("studis: {message}");
+                        subject_error_exit_code(&message)
+                    }
+                }
+            }
+        },
+        Command::Auth { command } => match command {
+            AuthCommand::Web { command } => match command {
+                WebAuthCommand::Login => match WebSession::open(true, true) {
+                    Ok(session) => {
+                        eprintln!("studis: Complete VUT sign-in in the browser window.");
+                        match session.login() {
+                            Ok(()) => write_json(
+                                &serde_json::json!({"schema_version":1,"status":"signed_in"}),
+                            ),
+                            Err(error) => {
+                                eprintln!("studis: {}", error.message());
+                                ExitCode::FAILURE
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("studis: {}", error.message());
+                        ExitCode::FAILURE
+                    }
+                },
+            },
         },
     }
 }
@@ -185,6 +360,26 @@ pub fn run() -> ExitCode {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn subject_defaults_preserve_explicit_news_cap_and_expand_shorthand() {
+        assert_eq!(default_news_limit(true, None), 10);
+        assert_eq!(default_news_limit(false, None), 0);
+        assert_eq!(default_news_limit(true, Some(4)), 4);
+        assert_eq!(default_news_limit(false, Some(4)), 4);
+    }
+
+    #[test]
+    fn resolved_reversed_subject_window_is_an_argument_error() {
+        assert_eq!(
+            subject_error_exit_code("--from must not be after --to"),
+            ExitCode::from(2)
+        );
+        assert_eq!(
+            subject_error_exit_code("VUT API rate limited"),
+            ExitCode::FAILURE
+        );
+    }
 
     #[test]
     fn raw_studies_wrapper_preserves_upstream_fields() {

@@ -556,7 +556,8 @@ mod tests {
             let output = child.wait_with_output().expect("wait for auth helper");
             assert!(
                 output.status.success(),
-                "helper failed: {}",
+                "helper failed: stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
         }

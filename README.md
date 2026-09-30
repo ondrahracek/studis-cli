@@ -2,7 +2,34 @@
 
 An unofficial, student-maintained command-line interface for the Brno University of Technology (VUT) information system. The intended executable name is `studis`. It will provide predictable JSON output for coding agents and useful commands for people. Studis is the familiar student portal name; the eventual scope may include other VUT systems where documented APIs and user permissions allow it.
 
-**Status:** early read-only CLI. The binary supports help, version, command discovery, studies, study news, and personal teaching schedule reads through the VUT API. This project is not affiliated with or endorsed by VUT.
+**Status:** early read-only CLI. The binary supports help, version, command discovery, study and account context, study news, personal schedule reads, and a one-subject view with optional authenticated web enrichment. This project is not affiliated with or endorsed by VUT.
+
+## Quick start from source
+
+Clone the repository and use its pinned Rust toolchain through mise:
+
+```sh
+git clone https://github.com/ondrahracek/studis-cli.git
+cd studis-cli
+mise install
+mise exec -- cargo build --locked
+mise exec -- cargo install --locked --path .
+studis --help
+```
+
+The build-only binary is also available as `./target/debug/studis`. For authenticated commands, create the ignored `.env` from the variable names in [`.env.example`](.env.example), set your personal VUT API client credentials, and load it with `direnv allow`. Then a subject lookup needs only:
+
+```sh
+studis subjects show IZP
+```
+
+API-only sections work without a browser session. To add authenticated Studis and Moodle page enrichment, complete the optional interactive login once before the lookup:
+
+```sh
+studis auth web login
+```
+
+See [Credentials and live API testing](#credentials-and-live-api-testing) for token handling and [One-subject view](docs/subject-view.md) for section meanings and partial-result handling.
 
 ## Commands and output
 
@@ -10,23 +37,49 @@ An unofficial, student-maintained command-line interface for the Brno University
 studis --help
 studis --version
 studis capabilities
+studis auth web login
 studis studies list
+studis studies index --study-id 12345
+studis account roles
 studis news list --since 2026-09-01
 studis schedule teaching --from 2026-09-29T08:00 --to 2026-09-29T18:00
 studis schedule weeks --from 2026-09-28 --to 2026-10-04
+studis schedule terms
+studis subjects show IZP
 ```
 
 `studis capabilities` writes one JSON object to stdout:
 
 ```json
-{"schema_version":1,"cli_version":"0.0.0","commands":["capabilities","studies list","news list","schedule teaching","schedule weeks"]}
+{"schema_version":1,"cli_version":"0.0.0","commands":["capabilities","studies list","studies index","account roles","news list","schedule teaching","schedule weeks","schedule terms","subjects show","auth web login"]}
 ```
 
-`schema_version` is an integer for this CLI-owned JSON contract; `cli_version` is the package version string; `commands` contains executable subcommand names. The output ends with a newline. Help and version print text on stdout. Clap handles help and version immediately, even if tokens follow them. Other parse errors, including a missing or unknown command, exit 2 with an explanation on stderr and empty stdout. Successful invocations exit 0 with empty stderr. `capabilities` output has no color codes or account-specific data. Clap diagnostics can echo invalid arguments, so never put secrets in command-line arguments. A closed output pipe exits successfully without a panic.
+`schema_version` is an integer for this CLI-owned JSON contract; `cli_version` is the package version string; `commands` contains executable subcommand names. The output ends with a newline. Help and version print text on stdout. Clap handles help and version immediately, even if tokens follow them. Other parse errors, including a missing or unknown command, exit 2 with an explanation on stderr and empty stdout. Successful noninteractive invocations exit 0 with empty stderr. `auth web login` prints an interactive sign-in instruction to stderr. `capabilities` output has no color codes or account-specific data. Clap diagnostics can echo invalid arguments, so never put secrets in command-line arguments. A closed output pipe exits successfully without a panic.
 
 `studis studies list` writes `{"schema_version":1,"raw":...}` followed by a newline. `raw` contains the complete VUT JSON response and is upstream-owned; its nested fields may change independently of this CLI's schema version. The command requires a user-owned VUT OAuth client or an access token. Missing credentials or an API failure exits 1 with empty stdout and a short redacted diagnostic on stderr. The command performs a GET; it has no VUT data write action.
 
+`studis studies index --study-id ID` reads the index for the explicit numeric study ID obtained from `studies list`. `studis account roles` reads account role context. `studis schedule terms` makes an unfiltered request and returns the terms selected by VUT; it does not promise a complete history or an exact date range. These commands use the same raw wrapper, authentication, and error contract. Invalid or overflowing study IDs exit 2 before authentication. See [academic context reads](docs/academic-context.md) for exact endpoint mappings and observed limits.
+
 The news and schedule commands use the same raw JSON wrapper. `--since` and schedule-weeks bounds are calendar dates (`YYYY-MM-DD`); teaching bounds are local date-times (`YYYY-MM-DDTHH:MM`) passed to VUT without timezone conversion. Invalid dates and reversed windows exit 2 before authentication. See [news and schedule](docs/news-and-schedule.md) for exact endpoint mappings and known limits.
+
+## Subject view
+
+After setting up API credentials below, look up a subject by its exact code:
+
+```sh
+studis subjects show IZP
+```
+
+The positional selector matches an exact `zkratka`, case-insensitively, and falls back to an exact `ap_nazev`. The CLI searches every active study and asks for `--study-id` or `--offering-id` when the result is ambiguous. The original fully explicit invocation remains available for scripts:
+
+```sh
+studis subjects show \
+  --offering-id 42 --study-id 7 \
+  --from 2026-09-28T00:00 --to 2026-10-05T23:59 \
+  --news-since 2026-09-01
+```
+
+The command writes one JSON object with `catalog`, `study_record`, `announcements`, `personal_schedule`, `course_timetable`, and `moodle` sections. Each has a `status` such as `available` or `unavailable`; check it before using `data`. Shorthand covers the selected offering's September–August academic year, requests news since `1900-01-01`, and hydrates every matching news row returned by that list call within a finite detail budget. `requested.max_news` is `0` for this all-returned mode; an explicit `--max-news` cap sets `truncated` when it omits returned matches. The flag-only route still defaults to 10. The command uses documented VUT GETs and, after a one-time `studis auth web login`, enriches the result with authenticated Studis and Moodle pages. [One-subject view](docs/subject-view.md) defines selection, section contracts, source links, and current limits. [Web login](docs/web-auth.md) describes browser setup and session reuse.
 
 ## Development setup
 
@@ -71,11 +124,16 @@ Live VUT checks are opt-in and read-only. Documentation visibility does not prov
 - `src/token_store.rs`: private Unix file cache and Windows Credential Manager storage
 - `src/http.rs`: bounded HTTP client settings
 - `src/resources/`: endpoint-specific operations and wire types
+- `src/subject_view.rs` and `src/subject_view/`: one-subject composition, lookup, browser enrichment, source statuses, and CLI-owned JSON
+- `src/web_session.rs` and `src/web/`: browser session and read-only page extraction
 - `tests/`: offline process tests; pure request/response tests live beside source
 - `docs/architecture.md`: module boundaries
 - `docs/cli-foundation.md`: current command and output contract
 - `docs/studies-access.md`: authenticated studies flow and upstream JSON boundary
+- `docs/academic-context.md`: explicit study index, account roles, and upstream-selected terms
 - `docs/news-and-schedule.md`: news and schedule commands, endpoint mappings, and limits
+- `docs/subject-view.md`: one-subject command, output contract, source provenance, and limits
+- `docs/web-auth.md`: browser login, session storage, and renewal
 
 ## Contributing
 

@@ -14,13 +14,18 @@ name = "studis"
 path = "src/main.rs"
 
 [dependencies]
+caseless = "0.2.2"
+chrono = "0.4.42"
+chrono-tz = "0.10.4"
 clap = { version = "4.6.7", features = ["derive"] }
+directories = "6.0.0"
+headless_chrome = "1.0.22"
 reqwest = { version = "0.13.5", features = ["blocking", "query", "rustls"], default-features = false }
+scraper = "0.25.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 
 [target.'cfg(unix)'.dependencies]
-directories = "6.0.0"
 rustix = { version = "1.1.5", features = ["fs", "process"] }
 
 [target.'cfg(windows)'.dependencies]

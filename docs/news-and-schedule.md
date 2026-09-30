@@ -2,6 +2,8 @@
 
 These commands use documented VUT GETs. They use an already-issued Bearer token from `VUT_API_ACCESS_TOKEN` when present, or reuse a token associated with `VUT_API_CLIENT_UID` from a private plaintext Unix file or Windows Credential Manager. The CLI does not read `.env` itself. A cached token rejected with HTTP 401 causes one new client-credentials grant and one repeat of the same GET; other failures are not retried. They do not select or save a study ID, follow redirects, or perform a VUT data write. Authentication setup and the JSON ownership boundary are also described in [studies access](studies-access.md).
 
+The unparameterized `studis schedule terms` command is documented separately in [academic context reads](academic-context.md) because VUT, rather than CLI date flags, selects its scope.
+
 | Command | Documented GET | Query mapping | Expected data |
 | --- | --- | --- | --- |
 | `studis news list --since YYYY-MM-DD` | [`/api/moje/studia/aktuality/v1`](https://api.vut.cz/doc/area/1789/endpoint/417374/method/4) | `datum_od` | `data.dokumenty` |
