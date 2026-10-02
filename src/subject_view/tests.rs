@@ -471,6 +471,13 @@ fn returned_moodle_link_is_checked_before_exposure() {
         &identity,
         Ok(json!({"data":{"odkazy":[{"odkaz_moodle":"https://moodle.vut.cz.evil.example/path"}]}})),
     );
+    let ambiguous = moodle_section(
+        &identity,
+        Ok(json!({"data":{"odkazy":[
+            {"odkaz_moodle":"https://moodle.vut.cz/course/view.php?id=42"},
+            {"odkaz_moodle":"https://moodle.vut.cz/course/view.php?id=43"}
+        ]}})),
+    );
     let good = serde_json::to_value(good).unwrap();
     assert_eq!(good["reason"], "web_session_unavailable");
     assert_eq!(
@@ -480,6 +487,10 @@ fn returned_moodle_link_is_checked_before_exposure() {
     assert_eq!(
         serde_json::to_value(bad).unwrap()["reason"],
         "no_verified_moodle_link"
+    );
+    assert_eq!(
+        serde_json::to_value(ambiguous).unwrap()["reason"],
+        "ambiguous_moodle_links"
     );
 }
 
@@ -500,6 +511,66 @@ fn web_auth_failure_preserves_api_moodle_failure_without_link() {
     );
     mark_moodle_web_auth_required(&mut linked);
     assert_eq!(linked.reason, Some("auth_required"));
+}
+
+#[test]
+fn studis_auth_failure_does_not_hide_an_available_moodle_course() {
+    let scope = RequestScope {
+        offering_id: 42,
+        study_id: 7,
+        from: "2026-09-01T00:00".into(),
+        to: "2027-08-31T23:59".into(),
+        news_since: "1900-01-01".into(),
+        max_news: 0,
+    };
+    let empty = || Section::unavailable(None, "synthetic", Value::Null);
+    let mut view = SubjectView {
+        schema_version: 1,
+        subject: SubjectIdentity {
+            offering_id: 42,
+            subject_id: 142,
+            faculty_id: 13,
+            academic_year: 2026,
+            semester_type_id: 2,
+            study_id: 7,
+        },
+        requested: RequestedScope {
+            from: scope.from.clone(),
+            to: scope.to.clone(),
+            news_since: scope.news_since.clone(),
+            max_news: scope.max_news,
+        },
+        sections: SubjectSections {
+            catalog: empty(),
+            study_record: empty(),
+            announcements: empty(),
+            personal_schedule: empty(),
+            course_timetable: empty(),
+            moodle: Section::unavailable(
+                None,
+                "web_session_unavailable",
+                json!({"course_url":"https://moodle.vut.cz/course/view.php?id=42","sections":[]}),
+            ),
+        },
+        warnings: Vec::new(),
+    };
+
+    enrich_web_with(&mut view, &scope, |url| {
+        if url.starts_with("https://www.vut.cz/") {
+            Err(WebError::AuthRequired)
+        } else if url == "https://moodle.vut.cz/course/view.php?id=42" {
+            Ok("<body id='page-course-view-topics'><ul><li class='section' data-sectionid='1'><h3 class='sectionname'>Files</h3></li></ul></body>".into())
+        } else {
+            panic!("unexpected read: {url}");
+        }
+    });
+
+    let output = serde_json::to_value(view).unwrap();
+    assert_eq!(output["sections"]["moodle"]["status"], "available");
+    assert_eq!(
+        output["sections"]["moodle"]["data"]["sections"][0]["title"],
+        "Files"
+    );
 }
 
 #[test]

@@ -2,7 +2,7 @@
 
 An unofficial, student-maintained command-line interface for the Brno University of Technology (VUT) information system. The intended executable name is `studis`. It will provide predictable JSON output for coding agents and useful commands for people. Studis is the familiar student portal name; the eventual scope may include other VUT systems where documented APIs and user permissions allow it.
 
-**Status:** early read-only CLI. The binary supports help, version, command discovery, study and account context, study news, personal schedule reads, and a one-subject view with optional authenticated web enrichment. This project is not affiliated with or endorsed by VUT.
+**Status:** early read-only VUT CLI. The binary supports help, version, command discovery, study and account context, study news, personal schedule reads, a one-subject view, and bounded Moodle resource listing and one-file download with optional authenticated web access. This project is not affiliated with or endorsed by VUT.
 
 ## Quick start from source
 
@@ -23,10 +23,11 @@ The build-only binary is also available as `./target/debug/studis`. For authenti
 studis subjects show IZP
 ```
 
-API-only sections work without a browser session. To add authenticated Studis and Moodle page enrichment, complete the optional interactive login once before the lookup:
+API-only sections work without a browser session. To add authenticated Studis page enrichment, complete its optional interactive login before the lookup. Moodle uses a separate login target, so sign in there as well when Moodle enrichment or file access reports that authentication is required:
 
 ```sh
 studis auth web login
+studis auth web login --target moodle
 ```
 
 See [Credentials and live API testing](#credentials-and-live-api-testing) for token handling and [One-subject view](docs/subject-view.md) for section meanings and partial-result handling.
@@ -38,6 +39,7 @@ studis --help
 studis --version
 studis capabilities
 studis auth web login
+studis auth web login --target moodle
 studis studies list
 studis studies index --study-id 12345
 studis account roles
@@ -46,12 +48,14 @@ studis schedule teaching --from 2026-09-29T08:00 --to 2026-09-29T18:00
 studis schedule weeks --from 2026-09-28 --to 2026-10-04
 studis schedule terms
 studis subjects show IZP
+studis subjects files IZP
+studis subjects download IZP --file 5 --output ./slides.pdf
 ```
 
 `studis capabilities` writes one JSON object to stdout:
 
 ```json
-{"schema_version":1,"cli_version":"0.0.0","commands":["capabilities","studies list","studies index","account roles","news list","schedule teaching","schedule weeks","schedule terms","subjects show","auth web login"]}
+{"schema_version":1,"cli_version":"0.0.0","commands":["capabilities","studies list","studies index","account roles","news list","schedule teaching","schedule weeks","schedule terms","subjects show","subjects files","subjects download","auth web login"]}
 ```
 
 `schema_version` is an integer for this CLI-owned JSON contract; `cli_version` is the package version string; `commands` contains executable subcommand names. The output ends with a newline. Help and version print text on stdout. Clap handles help and version immediately, even if tokens follow them. Other parse errors, including a missing or unknown command, exit 2 with an explanation on stderr and empty stdout. Successful noninteractive invocations exit 0 with empty stderr. `auth web login` prints an interactive sign-in instruction to stderr. `capabilities` output has no color codes or account-specific data. Clap diagnostics can echo invalid arguments, so never put secrets in command-line arguments. A closed output pipe exits successfully without a panic.
@@ -79,7 +83,9 @@ studis subjects show \
   --news-since 2026-09-01
 ```
 
-The command writes one JSON object with `catalog`, `study_record`, `announcements`, `personal_schedule`, `course_timetable`, and `moodle` sections. Each has a `status` such as `available` or `unavailable`; check it before using `data`. Shorthand covers the selected offering's September–August academic year, requests news since `1900-01-01`, and hydrates every matching news row returned by that list call within a finite detail budget. `requested.max_news` is `0` for this all-returned mode; an explicit `--max-news` cap sets `truncated` when it omits returned matches. The flag-only route still defaults to 10. The command uses documented VUT GETs and, after a one-time `studis auth web login`, enriches the result with authenticated Studis and Moodle pages. [One-subject view](docs/subject-view.md) defines selection, section contracts, source links, and current limits. [Web login](docs/web-auth.md) describes browser setup and session reuse.
+The command writes one JSON object with `catalog`, `study_record`, `announcements`, `personal_schedule`, `course_timetable`, and `moodle` sections. Each has a `status` such as `available` or `unavailable`; check it before using `data`. Shorthand covers the selected offering's September–August academic year, requests news since `1900-01-01`, and hydrates every matching news row returned by that list call within a finite detail budget. `requested.max_news` is `0` for this all-returned mode; an explicit `--max-news` cap sets `truncated` when it omits returned matches. The flag-only route still defaults to 10. The command uses documented VUT GETs and, after a one-time web login, enriches the result with authenticated Studis and Moodle pages. A Studis authentication failure does not suppress an independent Moodle read.
+
+`studis subjects files CODE` reuses the same subject selection rules and lists only direct Moodle `resource` activities. It preserves the Moodle module ID, resource title, and section context without opening every activity. `studis subjects download CODE --file ID --output PATH` downloads one module returned by that listing, with a 100 MiB cap (8 MiB for HTML) and atomic no-overwrite output. The result reports authentication, permission, unsupported-activity, and missing-link states explicitly; it never claims to be a complete Moodle file inventory. See [Moodle files](docs/moodle-files.md) for the listing and download contracts. [One-subject view](docs/subject-view.md) defines the composed view, while [web login](docs/web-auth.md) describes explicit Studis and Moodle targets.
 
 ## Development setup
 
@@ -123,6 +129,8 @@ Live VUT checks are opt-in and read-only. Documentation visibility does not prov
 - `src/auth.rs`: OAuth credential and token handling
 - `src/token_store.rs`: private Unix file cache and Windows Credential Manager storage
 - `src/http.rs`: bounded HTTP client settings
+- `src/moodle_files.rs`: bounded direct-resource listing, selection, and its CLI-owned output
+- `src/moodle_download.rs`: scoped cookie transfer, bounded streaming, and atomic one-file output
 - `src/resources/`: endpoint-specific operations and wire types
 - `src/subject_view.rs` and `src/subject_view/`: one-subject composition, lookup, browser enrichment, source statuses, and CLI-owned JSON
 - `src/web_session.rs` and `src/web/`: browser session and read-only page extraction
@@ -134,6 +142,7 @@ Live VUT checks are opt-in and read-only. Documentation visibility does not prov
 - `docs/news-and-schedule.md`: news and schedule commands, endpoint mappings, and limits
 - `docs/subject-view.md`: one-subject command, output contract, source provenance, and limits
 - `docs/web-auth.md`: browser login, session storage, and renewal
+- `docs/moodle-files.md`: direct Moodle resource listing and download contracts and limitations
 
 ## Contributing
 

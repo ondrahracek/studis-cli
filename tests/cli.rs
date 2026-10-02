@@ -195,6 +195,152 @@ fn web_login_help_and_missing_browser_have_noninteractive_contract() {
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     assert!(!String::from_utf8_lossy(&output.stderr).contains("credentials"));
+
+    let moodle = studis()
+        .env("STUDIS_BROWSER_PATH", "/no/such/browser")
+        .args(["auth", "web", "login", "--target", "moodle"])
+        .output()
+        .expect("Moodle login without browser");
+    assert_eq!(moodle.status.code(), Some(1));
+    assert!(moodle.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&moodle.stderr).contains("credentials"));
+}
+
+#[test]
+fn subject_files_help_and_missing_credentials_have_stable_contract() {
+    let help = studis()
+        .args(["subjects", "files", "--help"])
+        .output()
+        .expect("subject files help");
+    assert!(help.status.success());
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(text.contains("CODE_OR_NAME"));
+    assert!(text.contains("--study-id"));
+    assert!(text.contains("--offering-id"));
+
+    let output = studis()
+        .args(["subjects", "files", "IZP"])
+        .output()
+        .expect("subject files without API credentials");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("credentials"));
+}
+
+#[test]
+fn subject_download_help_and_validation_have_stable_contract() {
+    let help = studis()
+        .args(["subjects", "download", "--help"])
+        .output()
+        .expect("subject download help");
+    assert!(help.status.success());
+    let text = String::from_utf8_lossy(&help.stdout);
+    for expected in [
+        "CODE_OR_NAME",
+        "--file",
+        "--output",
+        "--study-id",
+        "--offering-id",
+    ] {
+        assert!(text.contains(expected), "missing {expected}");
+    }
+
+    for args in [
+        vec![
+            "subjects", "download", "IZP", "--file", "0", "--output", "file.pdf",
+        ],
+        vec!["subjects", "download", "IZP", "--file", "5"],
+    ] {
+        let output = studis()
+            .args(args)
+            .output()
+            .expect("invalid download command");
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("credentials"));
+    }
+
+    let directory = std::env::temp_dir().join(format!(
+        "studis-cli-download-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let output_path = directory.join("resource.bin");
+    let missing_credentials = studis()
+        .args(["subjects", "download", "IZP", "--file", "5", "--output"])
+        .arg(&output_path)
+        .output()
+        .expect("download without credentials");
+    assert_eq!(missing_credentials.status.code(), Some(1));
+    assert!(missing_credentials.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&missing_credentials.stderr).contains("credentials"));
+    assert!(!output_path.exists());
+
+    std::fs::write(&output_path, b"existing").unwrap();
+    let existing_output = studis()
+        .args(["subjects", "download", "IZP", "--file", "5", "--output"])
+        .arg(&output_path)
+        .output()
+        .expect("download to existing output");
+    assert_eq!(existing_output.status.code(), Some(1));
+    assert!(existing_output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&existing_output.stderr);
+    assert!(stderr.contains("already exists"));
+    assert!(!stderr.contains("credentials"));
+    assert_eq!(std::fs::read(&output_path).unwrap(), b"existing");
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn subject_commands_share_selector_validation_before_authentication() {
+    for args in [
+        vec!["subjects", "show", ""],
+        vec!["subjects", "files", ""],
+        vec![
+            "subjects",
+            "download",
+            "",
+            "--file",
+            "5",
+            "--output",
+            "resource.bin",
+        ],
+    ] {
+        let output = studis().args(args).output().expect("run empty selector");
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            "studis: CODE_OR_NAME must not be empty\n"
+        );
+    }
+
+    for args in [
+        vec!["subjects", "show", "--study-id", "7"],
+        vec!["subjects", "files", "--study-id", "7"],
+        vec![
+            "subjects",
+            "download",
+            "--study-id",
+            "7",
+            "--file",
+            "5",
+            "--output",
+            "resource.bin",
+        ],
+    ] {
+        let output = studis().args(args).output().expect("run partial selector");
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            "studis: provide CODE_OR_NAME or both --study-id and --offering-id\n"
+        );
+    }
 }
 
 #[test]
@@ -250,6 +396,8 @@ fn capabilities_has_exact_versioned_json_contract() {
                 "schedule weeks",
                 "schedule terms",
                 "subjects show",
+                "subjects files",
+                "subjects download",
                 "auth web login"
             ]
         })

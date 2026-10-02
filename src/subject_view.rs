@@ -10,11 +10,13 @@ mod lookup;
 mod web;
 
 #[cfg(test)]
+use crate::web_session::WebError;
+#[cfg(test)]
 use lookup::{active_study_ids, resolve_active_indexes, resolve_lookup_in_indexes, vut_today_at};
 use lookup::{resolve_subject, scope_from_request, vut_today};
 use web::enrich_web;
 #[cfg(test)]
-use web::{apply_timetable_html, mark_moodle_web_auth_required};
+use web::{apply_timetable_html, enrich_web_with, mark_moodle_web_auth_required};
 
 #[derive(Clone, Debug)]
 pub(crate) struct SubjectRequest {
@@ -307,32 +309,19 @@ fn moodle_section(identity: &SubjectIdentity, result: Result<Value, &'static str
     }));
     match result {
         Err(error) => Section::unavailable(Some(source), reason(error), Value::Null),
-        Ok(raw) => {
-            let links = raw
-                .pointer("/data/odkazy")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let url = links
-                .iter()
-                .filter_map(|link| link.get("odkaz_moodle").and_then(Value::as_str))
-                .find(|url| {
-                    reqwest::Url::parse(url).is_ok_and(|parsed| {
-                        parsed.scheme() == "https"
-                            && parsed.host_str() == Some("moodle.vut.cz")
-                            && parsed.username().is_empty()
-                            && parsed.password().is_none()
-                    })
-                });
-            match url {
-                Some(url) => Section::unavailable(
-                    Some(source),
-                    "web_session_unavailable",
-                    json!({"course_url":url,"sections":[]}),
-                ),
-                None => Section::unavailable(Some(source), "no_verified_moodle_link", Value::Null),
+        Ok(raw) => match subjects::verified_moodle_course_url(&raw) {
+            subjects::MoodleCourseLink::Unique(url) => Section::unavailable(
+                Some(source),
+                "web_session_unavailable",
+                json!({"course_url":url,"sections":[]}),
+            ),
+            subjects::MoodleCourseLink::Missing => {
+                Section::unavailable(Some(source), "no_verified_moodle_link", Value::Null)
             }
-        }
+            subjects::MoodleCourseLink::Ambiguous => {
+                Section::unavailable(Some(source), "ambiguous_moodle_links", Value::Null)
+            }
+        },
     }
 }
 
@@ -479,6 +468,10 @@ pub(crate) fn fetch(request: SubjectRequest) -> Result<SubjectView, String> {
     let resolved = resolve_subject(&request, &vut_today())?;
     let scope = scope_from_request(&request, &resolved)?;
     Ok(compose(scope, resolved.identity, resolved.records))
+}
+
+pub(crate) fn resolve_identity(request: &SubjectRequest) -> Result<SubjectIdentity, String> {
+    resolve_subject(request, &vut_today()).map(|resolved| resolved.identity)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

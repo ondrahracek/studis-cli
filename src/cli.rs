@@ -1,18 +1,19 @@
 //! Argument parsing, command dispatch, and CLI-owned output contracts.
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use std::{
     io::{self, Write},
     num::NonZeroU64,
+    path::PathBuf,
     process::ExitCode,
 };
 
 use crate::{
-    dates,
+    dates, moodle_download, moodle_files,
     resources::{account, news, schedule, studies},
     subject_view,
-    web_session::WebSession,
+    web_session::{LoginTarget, WebSession},
 };
 
 #[derive(Parser)]
@@ -77,30 +78,73 @@ enum AuthCommand {
 #[derive(Subcommand)]
 enum WebAuthCommand {
     /// Open a headed browser for VUT SSO; no password enters the CLI.
-    Login,
+    Login {
+        #[arg(long, value_enum, default_value_t)]
+        target: LoginTarget,
+    },
+}
+
+#[derive(Args)]
+struct SubjectSelector {
+    #[arg(
+        value_name = "CODE_OR_NAME",
+        help = "Exact subject code, or exact display name if no code matches"
+    )]
+    code_or_name: Option<String>,
+    #[arg(
+        long,
+        value_name = "ID",
+        help = "Optional term-specific offering selector (Studis apid)"
+    )]
+    offering_id: Option<NonZeroU64>,
+    #[arg(
+        long,
+        value_name = "ID",
+        help = "Optional study selector from studies list"
+    )]
+    study_id: Option<NonZeroU64>,
+}
+
+impl SubjectSelector {
+    fn validate(&self) -> Result<(), ExitCode> {
+        if self.code_or_name.is_none() && self.offering_id.is_none() {
+            eprintln!("studis: provide CODE_OR_NAME or both --study-id and --offering-id");
+            return Err(ExitCode::from(2));
+        }
+        if self
+            .code_or_name
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            eprintln!("studis: CODE_OR_NAME must not be empty");
+            return Err(ExitCode::from(2));
+        }
+        Ok(())
+    }
+
+    fn is_explicit_route(&self) -> bool {
+        self.code_or_name.is_none() && self.study_id.is_some() && self.offering_id.is_some()
+    }
+
+    fn into_request(self) -> subject_view::SubjectRequest {
+        subject_view::SubjectRequest {
+            code_or_name: self.code_or_name,
+            offering_id: self.offering_id.map(NonZeroU64::get),
+            study_id: self.study_id.map(NonZeroU64::get),
+            from: None,
+            to: None,
+            news_since: None,
+            max_news: 0,
+        }
+    }
 }
 
 #[derive(Subcommand)]
 enum SubjectsCommand {
     /// Return one subject view as CLI-owned JSON; sections report unavailable sources.
     Show {
-        #[arg(
-            value_name = "CODE_OR_NAME",
-            help = "Exact subject code, or exact display name if no code matches"
-        )]
-        code_or_name: Option<String>,
-        #[arg(
-            long,
-            value_name = "ID",
-            help = "Optional term-specific offering selector (Studis apid)"
-        )]
-        offering_id: Option<NonZeroU64>,
-        #[arg(
-            long,
-            value_name = "ID",
-            help = "Optional study selector from studies list"
-        )]
-        study_id: Option<NonZeroU64>,
+        #[command(flatten)]
+        selector: SubjectSelector,
         #[arg(long, value_name = "YYYY-MM-DDTHH:MM", help = "Local teaching-window start", value_parser = dates::local_datetime)]
         from: Option<String>,
         #[arg(long, value_name = "YYYY-MM-DDTHH:MM", help = "Local teaching-window end", value_parser = dates::local_datetime)]
@@ -109,6 +153,24 @@ enum SubjectsCommand {
         news_since: Option<String>,
         #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=50), help = "Cap matching announcements to hydrate (1–50); shorthand defaults to all returned rows")]
         max_news: Option<u8>,
+    },
+    /// List direct Moodle resource activities for one subject as CLI-owned JSON.
+    Files {
+        #[command(flatten)]
+        selector: SubjectSelector,
+    },
+    /// Download one listed Moodle resource without overwriting a file.
+    Download {
+        #[arg(
+            long,
+            value_name = "ID",
+            help = "Moodle module ID returned by subjects files"
+        )]
+        file: NonZeroU64,
+        #[arg(long, value_name = "PATH", help = "New output path (must not exist)")]
+        output: PathBuf,
+        #[command(flatten)]
+        selector: SubjectSelector,
     },
 }
 
@@ -250,6 +312,8 @@ pub fn run() -> ExitCode {
                     "schedule weeks",
                     "schedule terms",
                     "subjects show",
+                    "subjects files",
+                    "subjects download",
                     "auth web login",
                 ],
             };
@@ -282,19 +346,15 @@ pub fn run() -> ExitCode {
         },
         Command::Subjects { command } => match command {
             SubjectsCommand::Show {
-                code_or_name,
-                offering_id,
-                study_id,
+                selector,
                 from,
                 to,
                 news_since,
                 max_news,
             } => {
-                let explicit_route =
-                    code_or_name.is_none() && study_id.is_some() && offering_id.is_some();
-                if code_or_name.is_none() && offering_id.is_none() {
-                    eprintln!("studis: provide CODE_OR_NAME or both --study-id and --offering-id");
-                    return ExitCode::from(2);
+                let explicit_route = selector.is_explicit_route();
+                if let Err(code) = selector.validate() {
+                    return code;
                 }
                 if explicit_route && (from.is_none() || to.is_none() || news_since.is_none()) {
                     eprintln!(
@@ -302,28 +362,46 @@ pub fn run() -> ExitCode {
                     );
                     return ExitCode::from(2);
                 }
-                if code_or_name
-                    .as_deref()
-                    .is_some_and(|value| value.trim().is_empty())
-                {
-                    eprintln!("studis: CODE_OR_NAME must not be empty");
-                    return ExitCode::from(2);
-                }
                 if let (Some(from), Some(to)) = (&from, &to)
                     && let Err(code) = validate_range(from, to)
                 {
                     return code;
                 }
-                match subject_view::fetch(subject_view::SubjectRequest {
-                    code_or_name,
-                    offering_id: offering_id.map(NonZeroU64::get),
-                    study_id: study_id.map(NonZeroU64::get),
-                    from,
-                    to,
-                    news_since,
-                    max_news: default_news_limit(explicit_route, max_news),
-                }) {
+                let mut request = selector.into_request();
+                request.from = from;
+                request.to = to;
+                request.news_since = news_since;
+                request.max_news = default_news_limit(explicit_route, max_news);
+                match subject_view::fetch(request) {
                     Ok(view) => write_json(&view),
+                    Err(message) => {
+                        eprintln!("studis: {message}");
+                        subject_error_exit_code(&message)
+                    }
+                }
+            }
+            SubjectsCommand::Files { selector } => {
+                if let Err(code) = selector.validate() {
+                    return code;
+                }
+                match moodle_files::fetch(selector.into_request()) {
+                    Ok(files) => write_json(&files),
+                    Err(message) => {
+                        eprintln!("studis: {message}");
+                        subject_error_exit_code(&message)
+                    }
+                }
+            }
+            SubjectsCommand::Download {
+                file,
+                output,
+                selector,
+            } => {
+                if let Err(code) = selector.validate() {
+                    return code;
+                }
+                match moodle_download::download(selector.into_request(), file.get(), &output) {
+                    Ok(receipt) => write_json(&receipt),
                     Err(message) => {
                         eprintln!("studis: {message}");
                         subject_error_exit_code(&message)
@@ -333,10 +411,10 @@ pub fn run() -> ExitCode {
         },
         Command::Auth { command } => match command {
             AuthCommand::Web { command } => match command {
-                WebAuthCommand::Login => match WebSession::open(true, true) {
+                WebAuthCommand::Login { target } => match WebSession::open(true, true) {
                     Ok(session) => {
                         eprintln!("studis: Complete VUT sign-in in the browser window.");
-                        match session.login() {
+                        match session.login(target) {
                             Ok(()) => write_json(
                                 &serde_json::json!({"schema_version":1,"status":"signed_in"}),
                             ),

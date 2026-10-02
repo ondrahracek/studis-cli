@@ -1,7 +1,12 @@
 //! User-driven browser login and noninteractive read-only session reuse.
 
 use directories::ProjectDirs;
-use headless_chrome::{Browser, LaunchOptions};
+use headless_chrome::{
+    Browser, LaunchOptions,
+    protocol::cdp::{Browser as CdpBrowser, Network, types::Method},
+};
+use scraper::{Html, Selector};
+use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsStr,
     fs,
@@ -10,8 +15,27 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::moodle_url;
+
 const MAX_PAGE_BYTES: usize = 2 * 1024 * 1024;
-const LOGIN_URL: &str = "https://www.vut.cz/studis/student.phtml";
+const STUDIS_LOGIN_URL: &str = "https://www.vut.cz/studis/student.phtml";
+const MOODLE_LOGIN_URL: &str = "https://moodle.vut.cz/my/";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum LoginTarget {
+    #[default]
+    Studis,
+    Moodle,
+}
+
+impl LoginTarget {
+    fn url(self) -> &'static str {
+        match self {
+            Self::Studis => STUDIS_LOGIN_URL,
+            Self::Moodle => MOODLE_LOGIN_URL,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WebError {
@@ -20,6 +44,73 @@ pub(crate) enum WebError {
     ProfileUnsafe,
     PageUnavailable,
     UnexpectedPage,
+}
+
+#[derive(Clone)]
+pub(crate) struct WebCookie {
+    pub(crate) name: String,
+    pub(crate) value: String,
+    pub(crate) domain: String,
+    pub(crate) path: String,
+    pub(crate) secure: bool,
+}
+
+// headless_chrome 1.0.22 generates this Storage response as one Cookie even
+// though the bundled CDP schema defines an array, so keep the adapter local.
+#[derive(Debug, Serialize)]
+struct GetBrowserCookies {
+    #[serde(skip_serializing_if = "Option::is_none", rename = "browserContextId")]
+    browser_context_id: Option<CdpBrowser::BrowserContextID>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetBrowserCookiesReturn {
+    cookies: Vec<Network::Cookie>,
+}
+
+impl Method for GetBrowserCookies {
+    const NAME: &'static str = "Storage.getCookies";
+    type ReturnObject = GetBrowserCookiesReturn;
+}
+
+fn retain_moodle_cookie_domains(cookies: Vec<WebCookie>) -> Vec<WebCookie> {
+    cookies
+        .into_iter()
+        .filter(|cookie| {
+            let domain = cookie
+                .domain
+                .strip_prefix('.')
+                .unwrap_or(&cookie.domain)
+                .to_ascii_lowercase();
+            domain == moodle_url::HOST
+                || moodle_url::HOST
+                    .strip_suffix(&domain)
+                    .is_some_and(|prefix| prefix.ends_with('.'))
+        })
+        .collect()
+}
+
+fn cookie_is_unpartitioned(has_partition_key: bool, partition_key_opaque: Option<bool>) -> bool {
+    !has_partition_key && partition_key_opaque != Some(true)
+}
+
+#[cfg(test)]
+impl WebCookie {
+    pub(crate) fn synthetic(
+        name: &str,
+        value: &str,
+        domain: &str,
+        path: &str,
+        secure: bool,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            value: value.into(),
+            domain: domain.into(),
+            path: path.into(),
+            secure,
+        }
+    }
 }
 
 impl WebError {
@@ -144,8 +235,15 @@ fn validate_final_url(expected: &str, actual: &str) -> Result<(), WebError> {
     if actual.host_str() == Some("id.vut.cz") || actual.path().contains("/login") {
         return Err(WebError::AuthRequired);
     }
+    if let Some(expected_course) = moodle_url::canonical_course_url(expected.as_str()) {
+        return match moodle_url::canonical_course_url(actual.as_str()) {
+            Some(actual_course) if actual_course == expected_course => Ok(()),
+            _ => Err(WebError::UnexpectedPage),
+        };
+    }
     if actual.scheme() != "https"
         || actual.host_str() != expected.host_str()
+        || actual.port_or_known_default() != expected.port_or_known_default()
         || actual.path() != expected.path()
     {
         return Err(WebError::UnexpectedPage);
@@ -159,6 +257,60 @@ fn validate_final_url(expected: &str, actual: &str) -> Result<(), WebError> {
         }
     }
     Ok(())
+}
+
+fn is_authenticated_page(target: LoginTarget, url: &str, html: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    match target {
+        LoginTarget::Studis => {
+            url.scheme() == "https"
+                && url.host_str() == Some("www.vut.cz")
+                && url.port().is_none()
+                && url.path() == "/studis/student.phtml"
+                && html.contains("vut-main-content")
+        }
+        LoginTarget::Moodle => {
+            let trusted_origin = url.scheme() == "https"
+                && url.host_str() == Some("moodle.vut.cz")
+                && url.port().is_none();
+            trusted_origin
+                && ((matches!(url.path(), "/my/" | "/my/index.php")
+                    && (html.contains("id=\"page-my-index\"")
+                        || html.contains("id='page-my-index'")))
+                    || (url.path() == "/local/customfrontpage/index.php"
+                        && authenticated_custom_frontpage(html)))
+        }
+    }
+}
+
+fn authenticated_custom_frontpage(html: &str) -> bool {
+    let document = Html::parse_document(html);
+    let body = Selector::parse("body#page-local-customfrontpage-index")
+        .expect("fixed Moodle frontpage selector");
+    if document.select(&body).next().is_none() {
+        return false;
+    }
+    let anchors = Selector::parse("a[href]").expect("fixed Moodle link selector");
+    let base = reqwest::Url::parse(MOODLE_LOGIN_URL).expect("fixed Moodle login URL");
+    let mut logout = false;
+    for href in document
+        .select(&anchors)
+        .filter_map(|anchor| anchor.value().attr("href"))
+        .filter_map(|href| base.join(href).ok())
+        .filter(|url| {
+            url.scheme() == "https"
+                && url.host_str() == Some("moodle.vut.cz")
+                && url.port().is_none()
+        })
+    {
+        if href.path() == "/login/index.php" {
+            return false;
+        }
+        logout |= href.path() == "/login/logout.php";
+    }
+    logout
 }
 
 pub(crate) struct WebSession {
@@ -196,22 +348,62 @@ impl WebSession {
         self.navigate(url).map(|(_, html)| html)
     }
 
-    pub(crate) fn login(&self) -> Result<(), WebError> {
+    pub(crate) fn cookies_for(&self, url: &str) -> Result<Vec<WebCookie>, WebError> {
         let tab = self
             .browser
             .new_tab()
             .map_err(|_| WebError::PageUnavailable)?;
-        tab.navigate_to(LOGIN_URL)
+        tab.navigate_to(url)
+            .map_err(|_| WebError::PageUnavailable)?;
+        tab.wait_until_navigated()
+            .map_err(|_| WebError::PageUnavailable)?;
+        validate_final_url(url, &tab.get_url())?;
+        let html = tab.get_content().map_err(|_| WebError::PageUnavailable)?;
+        if html.len() > MAX_PAGE_BYTES {
+            return Err(WebError::PageUnavailable);
+        }
+        tab.call_method(GetBrowserCookies {
+            browser_context_id: None,
+        })
+        .map_err(|_| WebError::PageUnavailable)
+        .map(|result| {
+            retain_moodle_cookie_domains(
+                result
+                    .cookies
+                    .into_iter()
+                    .filter(|cookie| {
+                        cookie_is_unpartitioned(
+                            cookie.partition_key.is_some(),
+                            cookie.partition_key_opaque,
+                        )
+                    })
+                    .map(|cookie| WebCookie {
+                        name: cookie.name,
+                        value: cookie.value,
+                        domain: cookie.domain,
+                        path: cookie.path,
+                        secure: cookie.secure,
+                    })
+                    .collect(),
+            )
+        })
+    }
+
+    pub(crate) fn login(&self, target: LoginTarget) -> Result<(), WebError> {
+        let tab = self
+            .browser
+            .new_tab()
+            .map_err(|_| WebError::PageUnavailable)?;
+        tab.navigate_to(target.url())
             .map_err(|_| WebError::PageUnavailable)?;
         tab.wait_until_navigated()
             .map_err(|_| WebError::PageUnavailable)?;
         let deadline = Instant::now() + Duration::from_secs(300);
         loop {
             let url = tab.get_url();
-            if url.starts_with(LOGIN_URL)
-                && tab
-                    .get_content()
-                    .is_ok_and(|html| html.contains("vut-main-content"))
+            if tab
+                .get_content()
+                .is_ok_and(|html| is_authenticated_page(target, &url, &html))
             {
                 return Ok(());
             }
@@ -244,6 +436,20 @@ mod tests {
             validate_final_url(expected, "https://moodle.vut.cz/course/view.php?id=43"),
             Err(WebError::UnexpectedPage)
         );
+        for actual in [
+            "https://moodle.vut.cz/course/view.php?id=42&id=43",
+            "https://moodle.vut.cz/course/view.php?id=42&token=extra",
+        ] {
+            assert_eq!(
+                validate_final_url(expected, actual),
+                Err(WebError::UnexpectedPage),
+                "accepted {actual}"
+            );
+        }
+        assert_eq!(
+            validate_final_url(expected, "https://moodle.vut.cz:444/course/view.php?id=42"),
+            Err(WebError::UnexpectedPage)
+        );
         assert_eq!(
             validate_final_url(expected, "https://id.vut.cz/auth/common/home/default"),
             Err(WebError::AuthRequired)
@@ -252,6 +458,85 @@ mod tests {
             validate_final_url(expected, "https://moodle.vut.cz/login/index.php"),
             Err(WebError::AuthRequired)
         );
+        assert_eq!(
+            validate_final_url(
+                "https://www.vut.cz/studis/student.phtml?gm=detail",
+                "https://www.vut.cz/studis/student.phtml?gm=detail&navigation=1"
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn login_targets_require_their_own_authenticated_page_marker() {
+        assert!(is_authenticated_page(
+            LoginTarget::Studis,
+            "https://www.vut.cz/studis/student.phtml",
+            "<body><main class='vut-main-content'></main></body>"
+        ));
+        assert!(is_authenticated_page(
+            LoginTarget::Moodle,
+            "https://moodle.vut.cz/my/",
+            "<body id='page-my-index' class='pagelayout-mydashboard'></body>"
+        ));
+        assert!(is_authenticated_page(
+            LoginTarget::Moodle,
+            "https://moodle.vut.cz/local/customfrontpage/index.php",
+            "<body id='page-local-customfrontpage-index'><a href='/login/logout.php?sesskey=synthetic'>Log out</a></body>"
+        ));
+        assert!(!is_authenticated_page(
+            LoginTarget::Moodle,
+            "https://moodle.vut.cz/local/customfrontpage/index.php",
+            "<body id='page-local-customfrontpage-index'><a href='/login/index.php'>Log in</a></body>"
+        ));
+        assert!(!is_authenticated_page(
+            LoginTarget::Moodle,
+            "https://moodle.vut.cz/login/index.php",
+            "<body id='page-login-index'></body>"
+        ));
+        assert!(!is_authenticated_page(
+            LoginTarget::Moodle,
+            "https://moodle.vut.cz/my/",
+            "<body><main>Generic page</main></body>"
+        ));
+        assert!(!is_authenticated_page(
+            LoginTarget::Moodle,
+            "https://moodle.vut.cz:444/my/",
+            "<body id='page-my-index' class='pagelayout-mydashboard'></body>"
+        ));
+        assert!(!is_authenticated_page(
+            LoginTarget::Studis,
+            "https://www.vut.cz:444/studis/student.phtml",
+            "<body><main class='vut-main-content'></main></body>"
+        ));
+    }
+
+    #[test]
+    fn browser_cookie_prefilter_keeps_only_domains_that_can_match_moodle() {
+        let cookies = vec![
+            WebCookie::synthetic("host", "one", "moodle.vut.cz", "/", true),
+            WebCookie::synthetic("parent", "two", ".vut.cz", "/", true),
+            WebCookie::synthetic("subdomain", "three", ".moodle.vut.cz", "/", true),
+            WebCookie::synthetic("sibling", "four", "www.vut.cz", "/", true),
+            WebCookie::synthetic("foreign", "five", ".evil.example", "/", true),
+        ];
+        assert_eq!(
+            retain_moodle_cookie_domains(cookies)
+                .into_iter()
+                .map(|cookie| cookie.name)
+                .collect::<Vec<_>>(),
+            ["host", "parent", "subdomain"]
+        );
+    }
+
+    #[test]
+    fn browser_cookie_prefilter_rejects_partitioned_contexts() {
+        assert!(cookie_is_unpartitioned(false, None));
+        assert!(cookie_is_unpartitioned(false, Some(false)));
+        assert!(!cookie_is_unpartitioned(true, None));
+        assert!(!cookie_is_unpartitioned(true, Some(false)));
+        assert!(!cookie_is_unpartitioned(false, Some(true)));
+        assert!(!cookie_is_unpartitioned(true, Some(true)));
     }
 
     #[cfg(unix)]

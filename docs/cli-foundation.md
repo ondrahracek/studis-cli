@@ -1,13 +1,13 @@
 # CLI foundation: command and output contract
 
-`studis` is the executable for the public `studis-cli` Rust package. `--help`, `--version`, and `capabilities` work offline; studies, account, news, schedule, and subject-view commands make read-only VUT API requests. The binary delegates to `src/cli.rs` through `src/main.rs`. Authenticated flows are documented in [studies access](studies-access.md), [academic context reads](academic-context.md), [news and schedule](news-and-schedule.md), and [one-subject view](subject-view.md).
+`studis` is the executable for the public `studis-cli` Rust package. `--help`, `--version`, and `capabilities` work offline; studies, account, news, schedule, subject-view, and Moodle-file commands make read-only VUT requests. The binary delegates to `src/cli.rs` through `src/main.rs`. Authenticated flows are documented in [studies access](studies-access.md), [academic context reads](academic-context.md), [news and schedule](news-and-schedule.md), [one-subject view](subject-view.md), and [Moodle resource files](moodle-files.md).
 
 ## Current behavior
 
 `studis capabilities` writes one CLI-owned JSON object followed by a newline:
 
 ```json
-{"schema_version":1,"cli_version":"0.0.0","commands":["capabilities","studies list","studies index","account roles","news list","schedule teaching","schedule weeks","schedule terms","subjects show","auth web login"]}
+{"schema_version":1,"cli_version":"0.0.0","commands":["capabilities","studies list","studies index","account roles","news list","schedule teaching","schedule weeks","schedule terms","subjects show","subjects files","subjects download","auth web login"]}
 ```
 
 `schema_version` is an integer for the JSON contract, `cli_version` is the package version string, and `commands` lists executable command paths in this build. The list is static and tested against the supported paths. Clap's implicit `help` subcommand is disabled; `--help` remains available.
@@ -18,7 +18,7 @@ Successful noninteractive commands exit 0 and leave stderr empty. `auth web logi
 
 The package is one Cargo crate. `clap` derive owns parsing; `serde` and `serde_json` own the JSON model; `assert_cmd` supports black-box process tests. The current CLI has no plugin system, persistent configuration, or alternate output format.
 
-CLI-owned JSON is versioned here. The individual authenticated resource commands place complete upstream VUT JSON under `raw`; its nested fields are outside this stability promise. `subjects show` composes stable section/status/provenance fields while retaining source records inside those sections. API behavior is tested offline through pure request, parser and composition tests and checked read-only against VUT, without a local imitation of VUT's API.
+CLI-owned JSON is versioned here. The individual authenticated resource commands place complete upstream VUT JSON under `raw`; its nested fields are outside this stability promise. `subjects show` composes stable section/status/provenance fields while retaining source records inside those sections. `subjects files` owns its identity, status, reason, resource, and limitation fields while Moodle owns their text values. `subjects download` owns its `status`, module ID, output path, and byte count. API and page behavior is tested offline through pure request, parser and composition tests and checked read-only against VUT, without a local imitation of VUT's services.
 
 ## Verification record
 

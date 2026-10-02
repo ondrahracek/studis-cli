@@ -1,8 +1,10 @@
 //! Documented read-only subject endpoints.
 
 use reqwest::blocking::{Client, Request};
+use serde_json::Value;
+use std::collections::BTreeSet;
 
-use crate::{auth, resources};
+use crate::{auth, moodle_url, resources};
 
 const SUBJECT_URL: &str = "https://api.vut.cz/api/predmety/aktualni_predmet";
 const TIMETABLE_URL: &str = "https://api.vut.cz/api/rozvrh/aktualni_predmet";
@@ -82,6 +84,29 @@ pub(crate) fn fetch_timetable(
     })?)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MoodleCourseLink {
+    Missing,
+    Unique(String),
+    Ambiguous,
+}
+
+pub(crate) fn verified_moodle_course_url(raw: &Value) -> MoodleCourseLink {
+    let mut candidates = raw
+        .pointer("/data/odkazy")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|link| link.get("odkaz_moodle").and_then(Value::as_str))
+        .filter_map(moodle_url::canonical_course_url)
+        .collect::<BTreeSet<_>>();
+    match candidates.len() {
+        0 => MoodleCourseLink::Missing,
+        1 => MoodleCourseLink::Unique(candidates.pop_first().expect("one Moodle course URL")),
+        _ => MoodleCourseLink::Ambiguous,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,5 +165,56 @@ mod tests {
         assert_eq!(parse_timetable(r#"{"data":{}}"#), Ok(json!({"data":{}})));
         assert!(parse_moodle(r#"{"data":{"odkazy":{}}}"#).is_err());
         assert!(parse_timetable(r#"{"data":{"vyucovani":{}}}"#).is_err());
+    }
+
+    #[test]
+    fn verified_moodle_link_accepts_only_the_fixed_course_route() {
+        let raw = json!({"data":{"odkazy":[
+            {"odkaz_moodle":"https://moodle.vut.cz.evil.example/course/view.php?id=42"},
+            {"odkaz_moodle":"https://moodle.vut.cz/mod/resource/view.php?id=5"},
+            {"odkaz_moodle":"https://moodle.vut.cz/course/view.php?id=42"}
+        ]}});
+        assert_eq!(
+            verified_moodle_course_url(&raw),
+            MoodleCourseLink::Unique("https://moodle.vut.cz/course/view.php?id=42".into())
+        );
+        assert_eq!(
+            verified_moodle_course_url(&json!({"data":{"odkazy":[]}})),
+            MoodleCourseLink::Missing
+        );
+        assert_eq!(
+            verified_moodle_course_url(&json!({"data":{"odkazy":[
+                {"odkaz_moodle":"https://moodle.vut.cz/course/view.php?id=42"},
+                {"odkaz_moodle":"https://moodle.vut.cz/course/view.php?id=43"}
+            ]}})),
+            MoodleCourseLink::Ambiguous
+        );
+        assert_eq!(
+            verified_moodle_course_url(&json!({"data":{"odkazy":[
+                {"odkaz_moodle":"https://moodle.vut.cz/course/view.php?id=00042"},
+                {"odkaz_moodle":"https://moodle.vut.cz/course/view.php?id=42"}
+            ]}})),
+            MoodleCourseLink::Unique("https://moodle.vut.cz/course/view.php?id=42".into())
+        );
+        assert_eq!(
+            moodle_url::canonical_course_url("https://moodle.vut.cz:444/course/view.php?id=42"),
+            None
+        );
+        for unsafe_url in [
+            "https://moodle.vut.cz/course/view.php?id=42&token=secret",
+            "https://moodle.vut.cz/course/view.php?id=42&id=43",
+            "https://moodle.vut.cz/course/view.php?id=42#private",
+        ] {
+            assert_eq!(
+                moodle_url::canonical_course_url(unsafe_url),
+                None,
+                "accepted {unsafe_url}"
+            );
+        }
+        assert_eq!(
+            moodle_url::canonical_course_url("https://moodle.vut.cz/course/view.php?id=00042")
+                .as_deref(),
+            Some("https://moodle.vut.cz/course/view.php?id=42")
+        );
     }
 }

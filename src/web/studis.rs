@@ -2,7 +2,7 @@
 
 use scraper::{ElementRef, Html, Selector};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn selector(css: &str) -> Selector {
     Selector::parse(css).expect("fixed CSS selector")
@@ -67,6 +67,47 @@ pub(crate) fn parse_catalogue(html: &str, base: &str) -> Result<Value, &'static 
         return Err("invalid Studis catalogue page");
     }
     Ok(json!({"fields":fields}))
+}
+
+pub(crate) fn moodle_course_url(catalogue: &Value) -> Option<String> {
+    fn names_moodle(value: &str) -> bool {
+        value
+            .split(|character: char| !character.is_alphanumeric())
+            .any(|word| caseless::canonical_caseless_match_str(word, "moodle"))
+    }
+
+    let mut candidates = BTreeSet::new();
+    for field in catalogue
+        .get("fields")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let field_names_moodle = field
+            .get("label")
+            .and_then(Value::as_str)
+            .is_some_and(names_moodle);
+        for link in field
+            .get("links")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let link_names_moodle = link
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(names_moodle);
+            if (field_names_moodle || link_names_moodle)
+                && let Some(url) = link
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .and_then(crate::moodle_url::canonical_course_url)
+            {
+                candidates.insert(url);
+            }
+        }
+    }
+    (candidates.len() == 1).then(|| candidates.pop_first().expect("one Moodle URL"))
 }
 
 pub(crate) fn parse_personal_detail(html: &str) -> Result<Value, &'static str> {
@@ -263,6 +304,29 @@ mod tests {
         assert_eq!(
             parsed["fields"][0]["links"],
             json!([{"text":"Moodle","url":"https://moodle.vut.cz/course/view.php?id=42"}])
+        );
+        assert_eq!(
+            moodle_course_url(&parsed).as_deref(),
+            Some("https://moodle.vut.cz/course/view.php?id=42")
+        );
+        assert_eq!(
+            moodle_course_url(
+                &json!({"fields":[{"links":[{"url":"https://moodle.vut.cz.evil.example/course/view.php?id=42"}]}]})
+            ),
+            None
+        );
+        assert_eq!(
+            moodle_course_url(
+                &json!({"fields":[{"label":"Literature","links":[{"text":"Course notes","url":"https://moodle.vut.cz/course/view.php?id=42"}]}]})
+            ),
+            None
+        );
+        assert_eq!(
+            moodle_course_url(&json!({"fields":[
+                {"label":"Moodle","links":[{"text":"Course","url":"https://moodle.vut.cz/course/view.php?id=42"}]},
+                {"label":"Resources","links":[{"text":"Moodle","url":"https://moodle.vut.cz/course/view.php?id=43"}]}
+            ]})),
+            None
         );
         assert!(
             parse_catalogue(

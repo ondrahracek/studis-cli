@@ -61,12 +61,28 @@ pub(super) fn enrich_web(view: &mut SubjectView, scope: &RequestScope) {
             return;
         }
     };
+    enrich_web_with(view, scope, |url| session.read(url));
+}
 
+pub(super) fn enrich_web_with(
+    view: &mut SubjectView,
+    scope: &RequestScope,
+    mut read: impl FnMut(&str) -> Result<String, WebError>,
+) {
+    enrich_studis(view, scope, &mut read);
+    enrich_moodle(view, &mut read);
+}
+
+fn enrich_studis(
+    view: &mut SubjectView,
+    scope: &RequestScope,
+    read: &mut impl FnMut(&str) -> Result<String, WebError>,
+) {
     let catalog_url = format!(
         "https://www.vut.cz/studis/student.phtml?gm=gm_detail_predmetu&apid={}",
         scope.offering_id
     );
-    match session.read(&catalog_url) {
+    match read(&catalog_url) {
         Ok(html) => match studis::parse_catalogue(&html, &catalog_url) {
             Ok(data) => {
                 if let Some(map) = view.sections.catalog.data.as_object_mut() {
@@ -104,7 +120,7 @@ pub(super) fn enrich_web(view: &mut SubjectView, scope: &RequestScope) {
         "https://www.vut.cz/studis/student.phtml?sn=predmet_detail&apid={}",
         scope.offering_id
     );
-    if let Ok(html) = session.read(&personal_url)
+    if let Ok(html) = read(&personal_url)
         && let Ok(data) = studis::parse_personal_detail(&html)
     {
         if let Some(map) = view.sections.study_record.data.as_object_mut() {
@@ -143,7 +159,7 @@ pub(super) fn enrich_web(view: &mut SubjectView, scope: &RequestScope) {
                 }
                 continue;
             }
-            match session.read(&url) {
+            match read(&url) {
                 Ok(html) => match studis::parse_announcement_detail(&html, &url) {
                     Ok(data) => {
                         if let Some(map) = item.as_object_mut() {
@@ -188,13 +204,15 @@ pub(super) fn enrich_web(view: &mut SubjectView, scope: &RequestScope) {
         Some("unverified_empty_response")
     ) {
         let url = web_timetable_url(&view.subject);
-        if let Ok(html) = session.read(&url)
+        if let Ok(html) = read(&url)
             && let Ok(data) = studis::parse_timetable(&html, &scope.from, &scope.to)
         {
             apply_timetable_html(&mut view.sections.course_timetable, data, url);
         }
     }
+}
 
+fn enrich_moodle(view: &mut SubjectView, read: &mut impl FnMut(&str) -> Result<String, WebError>) {
     let course_url = view
         .sections
         .moodle
@@ -203,13 +221,13 @@ pub(super) fn enrich_web(view: &mut SubjectView, scope: &RequestScope) {
         .and_then(Value::as_str)
         .map(str::to_owned);
     if let Some(url) = course_url {
-        match session.read(&url) {
+        match read(&url) {
             Ok(html) => match moodle::parse_overview(&html, &url) {
                 Ok(data) => {
                     view.sections.moodle.status = SectionStatus::Available;
                     view.sections.moodle.reason = None;
                     view.sections.moodle.data =
-                        json!({"course_url":url,"sections":data["sections"]});
+                        json!({"course_url":url,"sections":data.into_sections()});
                     view.sections.moodle.sources.push(Source::now(url));
                 }
                 Err(_) => view.sections.moodle.reason = Some("invalid_web_page"),
