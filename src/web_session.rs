@@ -389,6 +389,27 @@ impl WebSession {
         })
     }
 
+    // Dropping `Browser` kills Chrome right after requesting a close, before it writes
+    // session cookies to the profile. A completed sign-in must survive into later reads.
+    fn shut_down_gracefully(&self) {
+        self.browser.set_default_timeout(Duration::from_secs(1));
+        if self
+            .browser
+            .get_tabs()
+            .lock()
+            .ok()
+            .and_then(|tabs| tabs.first().cloned())
+            .and_then(|tab| tab.call_method(CdpBrowser::Close(None)).ok())
+            .is_none()
+        {
+            return;
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && self.browser.get_version().is_ok() {
+            thread::sleep(Duration::from_millis(200));
+        }
+    }
+
     pub(crate) fn login(&self, target: LoginTarget) -> Result<(), WebError> {
         let tab = self
             .browser
@@ -405,6 +426,7 @@ impl WebSession {
                 .get_content()
                 .is_ok_and(|html| is_authenticated_page(target, &url, &html))
             {
+                self.shut_down_gracefully();
                 return Ok(());
             }
             if Instant::now() >= deadline {

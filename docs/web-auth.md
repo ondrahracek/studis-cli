@@ -1,6 +1,6 @@
 # Authenticated web session
 
-`studis auth web login` opens a headed Chrome or Chromium window for VUT Single Sign-On. Its default target is Studis. `--target moodle` instead opens the protected Moodle dashboard and reports success only when Moodle's authenticated dashboard marker is present. Sign in in that window, including any verification step. The command waits up to five minutes and closes the browser when it returns. It never accepts a password as a CLI argument or reads one from `.env`.
+`studis auth web login` opens a headed Chrome or Chromium window for VUT Single Sign-On. Its default target is Studis. `--target moodle` instead opens the protected Moodle dashboard and reports success only when Moodle's authenticated dashboard marker is present. Sign in in that window, including any verification step. The command waits up to five minutes. After a successful sign-in it asks Chrome to close and waits up to ten seconds for it to exit, so the profile keeps the new session cookies; otherwise it closes the browser when it returns. It never accepts a password as a CLI argument or reads one from `.env`.
 
 ```sh
 studis auth web login
